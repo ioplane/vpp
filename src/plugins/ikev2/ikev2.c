@@ -2729,8 +2729,26 @@ ikev2_flip_alternate_sa_bit (u32 id)
   return id | mask;
 }
 
+typedef struct
+{
+  u32 local_sa_id;
+  u8 other_protection;
+} ikev2_tunnel_protect_check_t;
+
+static walk_rc_t
+ikev2_check_tunnel_protect (index_t itpi, void *arg)
+{
+  ikev2_tunnel_protect_check_t *check = arg;
+  ipsec_tun_protect_t *itp = ipsec_tun_protect_get (itpi);
+  ipsec_sa_t *sa = ipsec_sa_get (itp->itp_out_sa);
+
+  if (sa->id != check->local_sa_id)
+    check->other_protection = 1;
+  return WALK_CONTINUE;
+}
+
 static void
-ikev2_del_tunnel_from_main (ikev2_del_ipsec_tunnel_args_t * a)
+ikev2_del_tunnel_from_main (ikev2_del_ipsec_tunnel_args_t *a)
 {
   ikev2_main_t *km = &ikev2_main;
   u32 ipip_sw_if_index = INDEX_INVALID;
@@ -2757,8 +2775,16 @@ ikev2_del_tunnel_from_main (ikev2_del_ipsec_tunnel_args_t * a)
     }
   else
     {
+      ikev2_tunnel_protect_check_t check = {
+	.local_sa_id = a->local_sa_id,
+      };
       sw_if_index = a->sw_if_index;
-      vnet_sw_interface_admin_down (vnet_get_main (), sw_if_index);
+      ipsec_tun_protect_walk_itf (sw_if_index, ikev2_check_tunnel_protect, &check);
+      /* A replacement Child SA may already protect the same GRE interface. */
+      if (check.other_protection)
+	sw_if_index = INDEX_INVALID;
+      else
+	vnet_sw_interface_admin_down (vnet_get_main (), sw_if_index);
     }
 
   if (INDEX_INVALID != sw_if_index)
