@@ -2268,6 +2268,7 @@ typedef struct
   u32 salt_local;
   u32 salt_remote;
   u32 local_sa_id;
+  u32 old_local_sa_id;
   u32 remote_sa_id;
   ipsec_sa_flags_t flags;
   u32 local_spi;
@@ -2345,7 +2346,7 @@ ikev2_add_tunnel_from_main (ikev2_add_ipsec_tunnel_args_t * a)
       ipsec_tun_protect_del (sw_if_index, NULL);
 
       /* replace local SA immediately */
-      ipsec_sa_unlock_id (a->local_sa_id);
+      ipsec_sa_unlock_id (a->old_local_sa_id);
 
       /* keep the old sa */
       vec_add1 (sas_in, a->old_remote_sa_id);
@@ -2383,7 +2384,8 @@ err0:
 static int
 ikev2_create_tunnel_interface (vlib_main_t *vm, ikev2_sa_t *sa,
 			       ikev2_child_sa_t *child, u32 sa_index,
-			       u32 child_index, u8 is_rekey, u8 kex)
+			       u32 child_index, u8 is_rekey, u8 kex,
+			       u32 old_local_sa_id, u32 old_remote_sa_id)
 {
   clib_thread_index_t thread_index = vlib_get_thread_index ();
   ikev2_main_t *km = &ikev2_main;
@@ -2682,6 +2684,7 @@ ikev2_create_tunnel_interface (vlib_main_t *vm, ikev2_sa_t *sa,
 
   if (is_rekey)
     {
+      a.old_local_sa_id = old_local_sa_id;
       /* create a new remote SA ID to keep the old SA for a bit longer
        * so the peer has some time to swap their SAs */
 
@@ -2689,15 +2692,14 @@ ikev2_create_tunnel_interface (vlib_main_t *vm, ikev2_sa_t *sa,
       u32 mask = 0x800;
       if (sa->current_remote_id_mask)
 	{
-	  sa->old_remote_id = a.old_remote_sa_id = remote_sa_id | mask;
 	  sa->current_remote_id_mask = 0;
 	}
       else
 	{
-	  sa->old_remote_id = a.old_remote_sa_id = remote_sa_id;
 	  sa->current_remote_id_mask = mask;
 	  remote_sa_id |= mask;
 	}
+      sa->old_remote_id = a.old_remote_sa_id = old_remote_sa_id;
       sa->old_id_expiration = 3.0;
       sa->old_remote_id_present = 1;
     }
@@ -2716,18 +2718,10 @@ typedef struct
   ip46_address_t local_ip;
   ip46_address_t remote_ip;
   u32 remote_sa_id;
+  u32 old_remote_sa_id;
   u32 local_sa_id;
   u32 sw_if_index;
 } ikev2_del_ipsec_tunnel_args_t;
-
-static u32
-ikev2_flip_alternate_sa_bit (u32 id)
-{
-  u32 mask = 0x800;
-  if (mask & id)
-    return id & ~mask;
-  return id | mask;
-}
 
 typedef struct
 {
@@ -2792,7 +2786,8 @@ ikev2_del_tunnel_from_main (ikev2_del_ipsec_tunnel_args_t *a)
 
   ipsec_sa_unlock_id (a->remote_sa_id);
   ipsec_sa_unlock_id (a->local_sa_id);
-  ipsec_sa_unlock_id (ikev2_flip_alternate_sa_bit (a->remote_sa_id));
+  if (a->old_remote_sa_id)
+    ipsec_sa_unlock_id (a->old_remote_sa_id);
 
   if (INDEX_INVALID != ipip_sw_if_index)
     km->ipip_del_tunnel_fn_ptr (ipip_sw_if_index);
@@ -2823,6 +2818,7 @@ ikev2_delete_tunnel_interface (vnet_main_t * vnm, ikev2_sa_t * sa,
     }
 
   a.remote_sa_id = child->remote_sa_id;
+  a.old_remote_sa_id = sa->old_remote_id_present ? sa->old_remote_id : 0;
   a.local_sa_id = child->local_sa_id;
   a.sw_if_index = (sa->is_tun_itf_set ? sa->tun_itf : ~0);
 
@@ -3734,7 +3730,7 @@ ikev2_node_internal (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *f
 		  ikev2_sa_match_ts (sa0);
 		  if (sa0->state != IKEV2_STATE_TS_UNACCEPTABLE)
 		    ikev2_create_tunnel_interface (vm, sa0, &sa0->childs[0],
-						   p[0], 0, 0, 0);
+						   p[0], 0, 0, 0, 0, 0);
 		}
 
 	      if (sa0->is_initiator)
@@ -3861,8 +3857,14 @@ ikev2_node_internal (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *f
 		  if (!sa0->rekey[0].notify_type &&
 		      sa0->rekey[0].protocol_id != IKEV2_PROTOCOL_IKE)
 		    {
+		      u32 old_local_sa_id = 0, old_remote_sa_id = 0;
 		      if (vec_len (sa0->childs) > 0)
-			ikev2_sa_free_all_child_sa (&sa0->childs);
+			{
+			  /* Child vector indices can shift after deleting an older SA. */
+			  old_local_sa_id = sa0->childs[0].local_sa_id;
+			  old_remote_sa_id = sa0->childs[0].remote_sa_id;
+			  ikev2_sa_free_all_child_sa (&sa0->childs);
+			}
 		      ikev2_child_sa_t *child;
 		      vec_add2 (sa0->childs, child, 1);
 		      clib_memset (child, 0, sizeof (*child));
@@ -3873,7 +3875,8 @@ ikev2_node_internal (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *f
 		      child->use_transport_mode = sa0->rekey[0].use_transport_mode;
 		      ikev2_create_tunnel_interface (vm, sa0, child, p[0],
 						     child - sa0->childs, 1,
-						     sa0->rekey[0].kex);
+					     sa0->rekey[0].kex, old_local_sa_id,
+					     old_remote_sa_id);
 		    }
 		  if (ike_hdr_is_response (ike0))
 		    {
@@ -3903,7 +3906,7 @@ ikev2_node_internal (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *f
 		  c->use_transport_mode = sa0->new_child[0].use_transport_mode;
 		  ikev2_create_tunnel_interface (vm, sa0, c, p[0],
 						 c - sa0->childs, 0,
-						 sa0->new_child[0].kex);
+						 sa0->new_child[0].kex, 0, 0);
 		  if (ike_hdr_is_request (ike0))
 		    {
 		      ike0->flags = IKEV2_HDR_FLAG_RESPONSE;
@@ -5551,7 +5554,7 @@ ikev2_mngr_process_child_sa (vlib_main_t *vm, ikev2_sa_t *sa, ikev2_child_sa_t *
 					 csa->local_sa_id, sas_in);
       if (rv)
 	vec_free (sas_in);
-      ipsec_sa_unlock_id (ikev2_flip_alternate_sa_bit (csa->remote_sa_id));
+      ipsec_sa_unlock_id (sa->old_remote_id);
       vlib_worker_thread_barrier_release (vm);
     }
 
