@@ -2677,16 +2677,14 @@ ikev2_create_tunnel_interface (vlib_main_t *vm, ikev2_sa_t *sa,
   for (child_index = 0; child_index < 0x800; child_index++)
     {
       u32 local_id = ikev2_mk_local_sa_id (sa_index, child_index, thread_index);
-      u32 remote_id = ikev2_mk_remote_sa_id (sa_index, child_index,
-					     thread_index) | remote_mask;
+      u32 remote_id = ikev2_mk_remote_sa_id (sa_index, child_index, thread_index) | remote_mask;
       ikev2_child_sa_t *existing;
       u8 used = local_id == old_local_sa_id || remote_id == old_remote_sa_id ||
-	(sa->old_remote_id_present && sa->old_remote_id == remote_id);
+		(sa->old_remote_id_present && sa->old_remote_id == remote_id);
       vec_foreach (existing, sa->childs)
 	{
 	  if (existing != child &&
-	      (existing->local_sa_id == local_id ||
-	       existing->remote_sa_id == remote_id))
+	      (existing->local_sa_id == local_id || existing->remote_sa_id == remote_id))
 	    used = 1;
 	}
       if (!used)
