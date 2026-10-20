@@ -31,6 +31,7 @@ from vpp_gre_interface import VppGreInterface
 from vpp_ipip_tun_interface import VppIpIpTunInterface
 from vpp_ipsec import VppIpsecSA
 from vpp_papi import VppEnum
+from vpp_papi_exceptions import CliFailedCommandError
 
 try:
     text_type = unicode
@@ -2747,6 +2748,25 @@ class TestResponderGreTransportMode(TestResponderRekey):
 
     use_transport_mode = True
     gre_tunnel = True
+
+
+class TestResponderGreReplayWindow(TestResponderGreTransportMode):
+    """IKEv2 profile replay window applies to inbound SAs after rekey."""
+
+    def setUp(self):
+        super().setUp()
+        self.vapi.cli("ikev2 profile set pr1 anti-replay-window 4096")
+        with self.assertRaisesRegex(CliFailedCommandError, "64 to 4096"):
+            self.vapi.cli("ikev2 profile set pr1 anti-replay-window 8192")
+        self.vapi.cli("ikev2 profile set pr1 anti-replay-window 1024")
+
+    def test_responder(self):
+        super().test_responder()
+        sizes = [
+            sa.entry.anti_replay_window_size for sa in self.vapi.ipsec_sa_v5_dump()
+        ]
+        self.assertIn(1024, sizes)
+        self.assertIn(64, sizes)
 
 
 class TestResponderGreNewChildDeleteOld(TestResponderPsk):

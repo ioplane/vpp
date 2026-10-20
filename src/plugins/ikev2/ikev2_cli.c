@@ -530,6 +530,12 @@ ikev2_profile_add_del_command_fn (vlib_main_t * vm,
 	    ikev2_set_profile_sa_lifetime (vm, name, tmp4, tmp1, tmp2, tmp5);
 	  goto done;
 	}
+      else if (unformat (line_input, "set %U anti-replay-window %u",
+			 unformat_ikev2_token, &name, &tmp1))
+	{
+	  r = ikev2_set_profile_anti_replay_window (name, tmp1);
+	  goto done;
+	}
       else if (unformat (line_input, "set %U udp-encap",
 			 unformat_ikev2_token, &name))
 	{
@@ -580,7 +586,8 @@ VLIB_CLI_COMMAND (ikev2_profile_add_del_command, static) = {
     "ikev2 profile set <id> ike-crypto-alg <crypto alg> <key size> ike-integ-alg <integ alg> ike-dh <dh type>\n"
     "ikev2 profile set <id> esp-crypto-alg <crypto alg> <key size> "
       "[esp-integ-alg <integ alg>]\n"
-    "ikev2 profile set <id> sa-lifetime <seconds> <jitter> <handover> <max bytes>"
+    "ikev2 profile set <id> sa-lifetime <seconds> <jitter> <handover> <max bytes>\n"
+    "ikev2 profile set <id> anti-replay-window <64..4096 power of two>\n"
     "ikev2 profile set <id> disable natt\n",
     .function = ikev2_profile_add_del_command_fn,
 };
