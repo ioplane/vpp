@@ -2475,9 +2475,19 @@ class TestInitiatorRekey(TestInitiatorPsk):
     """test ikev2 initiator - rekey"""
 
     vpp_worker_count = 2
+    pfs_group = 0
+
+    def setUp(self):
+        super().setUp()
+        if self.pfs_group:
+            self.vapi.cli(
+                "ikev2 profile set pr1 esp-crypto-alg aes-cbc 256 "
+                "esp-integ-alg hmac-sha2-256-128 esp-dh ecp-384"
+            )
 
     def rekey_from_initiator(self):
         ispi = int.from_bytes(self.sa.child_sas[0].ispi, "little")
+        old_ispi = self.sa.child_sas[0].ispi
         self.pg0.enable_capture()
         self.pg_start()
         self.vapi.ikev2_initiate_rekey_child_sa(ispi=ispi)
@@ -2494,11 +2504,22 @@ class TestInitiatorRekey(TestInitiatorPsk):
         )
         prop = sa[ikev2.IKEv2_payload_Proposal]
         self.sa.i_nonce = sa[ikev2.IKEv2_payload_Nonce].load
-        self.sa.r_nonce = self.sa.i_nonce
+        if self.pfs_group:
+            ke = sa[ikev2.IKEv2_payload_KE]
+            self.assertEqual(ke.group, self.pfs_group)
+            self.sa.ike_dh = DH_GROUP_IDS[self.pfs_group]
+            self.sa.generate_dh_data()
+            self.sa.i_dh_data = ke.load
+            self.sa.complete_dh_data()
+            self.sa.r_nonce = os.urandom(32)
+            sa[ikev2.IKEv2_payload_Nonce].load = self.sa.r_nonce
+            ke.load = self.sa.r_dh_data
+        else:
+            self.sa.r_nonce = self.sa.i_nonce
         # update new responder SPI
         self.sa.child_sas[0].ispi = prop.SPI
         self.sa.child_sas[0].rspi = prop.SPI
-        self.sa.calc_child_keys()
+        self.sa.calc_child_keys(kex=bool(self.pfs_group))
         header = ikev2.IKEv2(
             init_SPI=self.sa.ispi,
             resp_SPI=self.sa.rspi,
@@ -2511,7 +2532,24 @@ class TestInitiatorRekey(TestInitiatorPsk):
         packet = self.create_packet(
             self.pg0, resp, self.sa.sport, self.sa.dport, self.sa.natt, self.ip6
         )
-        self.send_and_assert_no_replies(self.pg0, packet)
+        self.pg0.add_stream(packet)
+        self.pg0.enable_capture()
+        self.pg_start()
+        ih = self.get_ike_header(self.pg0.get_capture(1)[0])
+        self.assertEqual(ih.exch_type, 37)  # INFORMATIONAL
+        delete = ikev2.IKEv2_payload_Delete(self.sa.hmac_and_decrypt(ih))
+        self.assertEqual(delete.proto, 3)  # ESP
+        self.assertEqual(delete.SPIs, old_ispi)
+        header = ikev2.IKEv2(
+            init_SPI=self.sa.ispi,
+            resp_SPI=self.sa.rspi,
+            flags="Response",
+            exch_type="INFORMATIONAL",
+            id=ih.id,
+            next_payload="Encrypted",
+        )
+        resp = self.encrypt_ike_msg(header, b"", None)
+        self.send_and_assert_no_replies(self.pg0, resp)
 
     def test_initiator(self):
         super(TestInitiatorRekey, self).test_initiator()
@@ -2526,6 +2564,12 @@ class TestInitiatorGreTransportMode(TestInitiatorRekey):
 
     use_transport_mode = True
     gre_tunnel = True
+
+
+class TestInitiatorPfsRekey(TestInitiatorRekey):
+    """test initiated Child SA rekey with ECP-384 PFS"""
+
+    pfs_group = 20
 
 
 class TestInitiatorGreTunnelMode(TestInitiatorPsk):

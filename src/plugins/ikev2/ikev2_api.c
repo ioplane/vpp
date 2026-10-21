@@ -948,7 +948,7 @@ vl_api_ikev2_set_esp_transforms_t_handler (vl_api_ikev2_set_esp_transforms_t *
   error =
     ikev2_set_profile_esp_transforms (vm, tmp, mp->tr.crypto_alg,
 				      mp->tr.integ_alg,
-				      ntohl (mp->tr.crypto_key_size));
+                                      ntohl (mp->tr.crypto_key_size), 0);
   vec_free (tmp);
   if (error)
     {

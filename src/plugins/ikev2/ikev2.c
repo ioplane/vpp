@@ -30,6 +30,8 @@ ikev2_main_t ikev2_main;
 static int ikev2_delete_tunnel_interface (vnet_main_t * vnm,
 					  ikev2_sa_t * sa,
 					  ikev2_child_sa_t * child);
+static int ikev2_send_delete_child_sa (vlib_main_t *vm, ikev2_sa_t *sa,
+				       u32 ispi);
 static_always_inline int ikev2_encr_is_aead (ikev2_transform_encr_type_t encr_type);
 
 typedef struct
@@ -1827,6 +1829,24 @@ ikev2_process_create_child_sa_req (vlib_main_t * vm,
       rekey = sa->rekey;
       if (vec_len (rekey) == 0)
 	goto cleanup_and_exit;
+
+      if (sa->rekey[0].kex)
+	{
+	  ikev2_sa_transform_t *dh = ikev2_sa_get_td_for_type (
+	    proposal, IKEV2_TRANSFORM_TYPE_DH);
+          if (!dh || !sar.dh_group || dh->dh_type != sa->dh_group ||
+              sar.dh_group != sa->dh_group ||
+              vec_len (sar.i_dh_data) != dh->key_len)
+	    goto cleanup_and_exit;
+	  vec_free (sa->r_dh_data);
+	  vec_free (sa->dh_shared_key);
+	  sa->r_dh_data = sar.i_dh_data;
+	  sar.i_dh_data = 0;
+	  ikev2_complete_dh (sa, dh);
+	}
+      else if (sar.dh_group)
+	goto cleanup_and_exit;
+
       rekey->notify_type = 0;
       rekey->protocol_id = proposal->protocol_id;
       rekey->i_proposal =
@@ -3110,6 +3130,8 @@ ikev2_generate_message (vlib_main_t *vm, vlib_buffer_t *b, ikev2_sa_t *sa, ike_h
 
 	  ikev2_payload_add_sa (chain, proposals, 0);
 	  ikev2_payload_add_nonce (chain, sa->i_nonce);
+	  if (sa->rekey[0].kex)
+	    ikev2_payload_add_ke (chain, sa->dh_group, sa->i_dh_data);
 	  ikev2_payload_add_ts (chain, sa->childs[0].tsi, IKEV2_PAYLOAD_TSI);
 	  ikev2_payload_add_ts (chain, sa->childs[0].tsr, IKEV2_PAYLOAD_TSR);
 	  ikev2_payload_add_notify_2 (chain, IKEV2_NOTIFY_MSG_REKEY_SA, data,
@@ -3890,9 +3912,11 @@ ikev2_node_internal (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *f
 		      sa0->rekey[0].protocol_id != IKEV2_PROTOCOL_IKE)
 		    {
 		      u32 old_local_sa_id = 0, old_remote_sa_id = 0;
+		      u32 old_ispi = 0;
 		      if (vec_len (sa0->childs) > 0)
 			{
 			  /* Child vector indices can shift after deleting an older SA. */
+			  old_ispi = sa0->childs[0].i_proposals->spi;
 			  old_local_sa_id = sa0->childs[0].local_sa_id;
 			  old_remote_sa_id = sa0->childs[0].remote_sa_id;
 			  ikev2_sa_free_all_child_sa (&sa0->childs);
@@ -3909,6 +3933,8 @@ ikev2_node_internal (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *f
 						     child - sa0->childs, 1,
 					     sa0->rekey[0].kex, old_local_sa_id,
 					     old_remote_sa_id);
+		      if (ike_hdr_is_response (ike0) && old_ispi)
+			ikev2_send_delete_child_sa (vm, sa0, old_ispi);
 		    }
 		  if (ike_hdr_is_response (ike0))
 		    {
@@ -4840,10 +4866,13 @@ clib_error_t *
 ikev2_set_profile_esp_transforms (vlib_main_t * vm, u8 * name,
 				  ikev2_transform_encr_type_t crypto_alg,
 				  ikev2_transform_integ_type_t integ_alg,
-				  u32 crypto_key_size)
+				  u32 crypto_key_size,
+				  ikev2_transform_dh_type_t dh_type)
 {
   ikev2_profile_t *p;
   clib_error_t *r;
+  ikev2_sa_transform_t *tr;
+  u8 supported = !dh_type;
 
   p = ikev2_profile_index_by_name (name);
 
@@ -4862,9 +4891,16 @@ ikev2_set_profile_esp_transforms (vlib_main_t * vm, u8 * name,
   if (integ_alg == IKEV2_TRANSFORM_INTEG_TYPE_AUTH_AES_CMAC_96)
     return clib_error_return (0, "AES-CMAC-96 is not supported for ESP SAs");
 
+  vec_foreach (tr, ikev2_main.supported_transforms)
+    if (tr->type == IKEV2_TRANSFORM_TYPE_DH && tr->dh_type == dh_type)
+      supported = true;
+  if (!supported)
+    return clib_error_return (0, "Unsupported ESP PFS group");
+
   p->esp_ts.crypto_alg = crypto_alg;
   p->esp_ts.integ_alg = integ_alg;
   p->esp_ts.crypto_key_size = crypto_key_size;
+  p->esp_ts.dh_type = dh_type;
   return 0;
 }
 
@@ -5219,9 +5255,8 @@ ikev2_initiate_sa_init (vlib_main_t * vm, u8 * name)
   return 0;
 }
 
-static void
-ikev2_delete_child_sa_internal (vlib_main_t * vm, ikev2_sa_t * sa,
-				ikev2_child_sa_t * csa)
+static int
+ikev2_send_delete_child_sa (vlib_main_t *vm, ikev2_sa_t *sa, u32 ispi)
 {
   /* Create the Initiator notification for child SA removal */
   ike_header_t *ike0;
@@ -5233,7 +5268,7 @@ ikev2_delete_child_sa_internal (vlib_main_t * vm, ikev2_sa_t * sa,
   if (!bi0)
     {
       log_err ("buffer alloc failure");
-      return;
+      return 0;
     }
 
   ike0 = vlib_buffer_get_current (b0);
@@ -5243,18 +5278,29 @@ ikev2_delete_child_sa_internal (vlib_main_t * vm, ikev2_sa_t * sa,
   ike0->flags = 0;
   vec_resize (sa->del, 1);
   sa->del->protocol_id = IKEV2_PROTOCOL_ESP;
-  sa->del->spi = csa->i_proposals->spi;
+  sa->del->spi = ispi;
   ike0->msgid = clib_host_to_net_u32 (sa->last_init_msg_id);
   sa->last_init_msg_id += 1;
   len = ikev2_generate_message (vm, b0, sa, ike0, 0, 0, 0);
   if (~0 == len)
-    return;
+    {
+      vlib_buffer_free (vm, &bi0, 1);
+      return 0;
+    }
 
   if (ikev2_natt_active (sa))
     len = ikev2_insert_non_esp_marker (ike0, len);
   ikev2_send_ike (vm, &sa->iaddr, &sa->raddr, bi0, len,
 		  ikev2_get_port (sa), sa->dst_port, sa->sw_if_index);
+  return 1;
+}
 
+static void
+ikev2_delete_child_sa_internal (vlib_main_t *vm, ikev2_sa_t *sa,
+				ikev2_child_sa_t *csa)
+{
+  if (!ikev2_send_delete_child_sa (vm, sa, csa->i_proposals->spi))
+    return;
   /* delete local child SA */
   ikev2_delete_tunnel_interface (vnet_get_main (), sa, csa);
   ikev2_sa_del_child_sa (sa, csa);
@@ -5330,6 +5376,28 @@ ikev2_rekey_child_sa_internal (vlib_main_t * vm, ikev2_sa_t * sa,
   vlib_buffer_t *b0;
   u32 bi0 = 0;
   int len;
+  ikev2_sa_transform_t *dh = 0, *tr;
+  ikev2_profile_t *p;
+
+  if (!sa->is_initiator || sa->profile_index == ~0)
+    return;
+  p = pool_elt_at_index (ikev2_main.profiles, sa->profile_index);
+
+  if (p->esp_ts.dh_type)
+    {
+      vec_foreach (tr, ikev2_main.supported_transforms)
+	if (tr->type == IKEV2_TRANSFORM_TYPE_DH &&
+	    tr->dh_type == p->esp_ts.dh_type)
+	  {
+	    dh = tr;
+	    break;
+	  }
+      if (!dh)
+	{
+	  log_err ("unsupported ESP PFS group");
+	  return;
+	}
+    }
 
   bi0 = ikev2_get_new_ike_header_buff (vm, &b0);
   if (!bi0)
@@ -5350,8 +5418,25 @@ ikev2_rekey_child_sa_internal (vlib_main_t * vm, ikev2_sa_t * sa,
   ikev2_rekey_t *rekey;
   vec_reset_length (sa->rekey);
   vec_add2 (sa->rekey, rekey, 1);
-  rekey->kex = 0;
+  rekey->kex = dh != 0;
   ikev2_sa_proposal_t *proposals = vec_dup (csa->i_proposals);
+
+  vec_reset_length (sa->i_nonce);
+  vec_validate (sa->i_nonce, 31);
+  if (RAND_bytes (sa->i_nonce, 32) != 1)
+    goto failure;
+
+  if (dh)
+    {
+      proposals[0].transforms = vec_dup (proposals[0].transforms);
+      vec_add1 (proposals[0].transforms, *dh);
+      vec_free (sa->dh_shared_key);
+      vec_free (sa->dh_private_key);
+      vec_free (sa->i_dh_data);
+      vec_free (sa->r_dh_data);
+      sa->dh_group = dh->dh_type;
+      ikev2_generate_dh (sa, dh);
+    }
 
   /*need new ispi */
   RAND_bytes ((u8 *) & proposals[0].spi, sizeof (proposals[0].spi));
@@ -5360,13 +5445,23 @@ ikev2_rekey_child_sa_internal (vlib_main_t * vm, ikev2_sa_t * sa,
   rekey->ispi = csa->i_proposals->spi;
   len = ikev2_generate_message (vm, b0, sa, ike0, proposals, 0, 0);
   if (~0 == len)
-    return;
+    goto failure;
 
   if (ikev2_natt_active (sa))
     len = ikev2_insert_non_esp_marker (ike0, len);
   ikev2_send_ike (vm, &sa->iaddr, &sa->raddr, bi0, len,
 		  ikev2_get_port (sa), ikev2_get_port (sa), sa->sw_if_index);
+  if (dh)
+    vec_free (proposals[0].transforms);
   vec_free (proposals);
+  return;
+
+failure:
+  if (dh && proposals[0].transforms != csa->i_proposals[0].transforms)
+    vec_free (proposals[0].transforms);
+  vec_free (proposals);
+  vec_reset_length (sa->rekey);
+  vlib_buffer_free (vm, &bi0, 1);
 }
 
 clib_error_t *
