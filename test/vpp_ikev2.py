@@ -11,7 +11,7 @@ class AuthMethod:
 
 
 class IDType:
-    v = {"ip4-addr": 1, "fqdn": 2, "ip6-addr": 5}
+    v = {"ip4-addr": 1, "fqdn": 2, "ip6-addr": 5, "key-id": 11}
 
     @staticmethod
     def value(key):

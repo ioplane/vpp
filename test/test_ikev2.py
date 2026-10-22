@@ -1157,8 +1157,11 @@ class IkePeer(VppTestCase):
         self.assertEqual(sa.r_id.type, self.sa.id_type)
         self.assertEqual(sa.i_id.data_len, len(self.sa.i_id))
         self.assertEqual(sa.r_id.data_len, len(self.idr))
-        self.assertEqual(bytes(sa.i_id.data, "ascii"), self.sa.i_id)
-        self.assertEqual(bytes(sa.r_id.data, "ascii"), self.idr)
+        # The legacy dump exposes ID data as a NUL-terminated API string.
+        self.assertEqual(
+            bytes(sa.i_id.data, "ascii"), self.sa.i_id.split(b"\x00", 1)[0]
+        )
+        self.assertEqual(bytes(sa.r_id.data, "ascii"), self.idr.split(b"\x00", 1)[0])
 
         n = self.vapi.ikev2_nonce_get(is_initiator=True, sa_index=sa.sa_index)
         self.verify_nonce(n, self.sa.i_nonce)
@@ -1231,8 +1234,10 @@ class IkePeer(VppTestCase):
         self.assertEqual(sa.r_id.type, self.sa.id_type)
         self.assertEqual(sa.i_id.data_len, len(self.sa.i_id))
         self.assertEqual(sa.r_id.data_len, len(self.idr))
-        self.assertEqual(bytes(sa.i_id.data, "ascii"), self.sa.i_id)
-        self.assertEqual(bytes(sa.r_id.data, "ascii"), self.idr)
+        self.assertEqual(
+            bytes(sa.i_id.data, "ascii"), self.sa.i_id.split(b"\x00", 1)[0]
+        )
+        self.assertEqual(bytes(sa.r_id.data, "ascii"), self.idr.split(b"\x00", 1)[0])
 
         r = self.vapi.ikev2_child_sa_dump(sa_index=sa.sa_index)
         self.assertEqual(len(r), 1)
@@ -1977,8 +1982,8 @@ class Ikev2Params(object):
         is_init = True if "is_initiator" not in params else params["is_initiator"]
         self.no_idr_auth = params.get("no_idr_in_auth", False)
 
-        idr = {"id_type": "fqdn", "data": b"vpp.home"}
-        idi = {"id_type": "fqdn", "data": b"roadwarrior.example.com"}
+        idr = params.get("idr", {"id_type": "fqdn", "data": b"vpp.home"})
+        idi = params.get("idi", {"id_type": "fqdn", "data": b"roadwarrior.example.com"})
         r_id = self.idr = idr["data"]
         i_id = self.idi = idi["data"]
         if is_init:
@@ -2779,6 +2784,51 @@ class TestResponderRekey(TestResponderPsk):
         self.assertEqual(r[0].sa.stats.n_rekey_req, 1)
         r = self.vapi.ikev2_sa_v2_dump()
         self.assertEqual(r[0].sa.stats.n_rekey_req, 1)
+
+
+class TestResponderKeyId(TestResponderRekey):
+    """Opaque KEY_ID authentication, rekey and byte-exact identity matching"""
+
+    def config_tc(self):
+        self.config_params(
+            {
+                "idi": {"id_type": "key-id", "data": b"peer\x00\xff\x01"},
+                "idr": {"id_type": "key-id", "data": b"vpp\x00\x80\xfe"},
+            }
+        )
+
+    def verify_sa_auth_resp(self, packet):
+        header = self.get_ike_header(packet)
+        plain = self.sa.hmac_and_decrypt(header)
+        identity = ikev2.IKEv2_payload_IDr(plain)
+        self.assertEqual(identity.IDtype, 11)
+        self.assertEqual(identity.load, self.idr)
+        return super().verify_sa_auth_resp(packet)
+
+
+class TestResponderKeyIdMismatch(TestResponderKeyId):
+    """KEY_ID mismatch after NUL rejects correctly authenticated peer"""
+
+    def verify_sa_auth_resp(self, packet):
+        header = self.get_ike_header(packet)
+        self.assertEqual(header.exch_type, 35)
+        self.assertEqual(header.id, self.sa.msg_id)
+        self.assertIn("Response", header.flags)
+        plain = self.sa.hmac_and_decrypt(header)
+        self.assertEqual(ikev2.IKEv2_payload_Notify(plain).type, 24)
+
+    def test_responder(self):
+        # The differing byte follows NUL, so string-based matching is insufficient.
+        self.sa.i_id = self.sa.i_id[:-1] + b"\x02"
+        self.send_sa_init_req()
+        self.send_sa_auth()
+        self.assertEqual(len(self.vapi.ipsec_sa_dump()), 0)
+        self.assertEqual(len(self.vapi.ikev2_sa_dump()), 0)
+
+    def delete_sas(self):
+        # Authentication rejection already removed the IKE SA.
+        self.p.remove_vpp_config()
+        self.assertIsNone(self.p.query_vpp_config())
 
 
 class TestResponderTransportMode(TestResponderRekey):

@@ -4687,10 +4687,9 @@ ikev2_set_profile_auth (vlib_main_t * vm, u8 * name, u8 auth_method,
 static int
 ikev2_is_id_supported (u8 id_type)
 {
-  return (id_type == IKEV2_ID_TYPE_ID_IPV4_ADDR ||
-	  id_type == IKEV2_ID_TYPE_ID_IPV6_ADDR ||
-	  id_type == IKEV2_ID_TYPE_ID_RFC822_ADDR ||
-	  id_type == IKEV2_ID_TYPE_ID_FQDN);
+  return (id_type == IKEV2_ID_TYPE_ID_IPV4_ADDR || id_type == IKEV2_ID_TYPE_ID_IPV6_ADDR ||
+	  id_type == IKEV2_ID_TYPE_ID_RFC822_ADDR || id_type == IKEV2_ID_TYPE_ID_FQDN ||
+	  id_type == IKEV2_ID_TYPE_ID_KEY_ID);
 }
 
 clib_error_t *
