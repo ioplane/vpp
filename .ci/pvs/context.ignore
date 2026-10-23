@@ -1,0 +1,6 @@
+.git
+.worktrees
+.beads
+build-pvs
+pvs-report
+.pvs-source-sha

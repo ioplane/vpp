@@ -37,6 +37,7 @@ def main():
 
     with tempfile.TemporaryDirectory(dir="/run/pvs") as temporary:
         work = Path(temporary)
+        os.environ["TMPDIR"] = temporary
         license_path = work / "PVS-Studio.lic"
         with os.fdopen(
             os.open(license_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
@@ -137,10 +138,11 @@ def main():
             )
         codequality.write_text(json.dumps(issues) + "\n")
         warnings = json.loads((output / "vpp.json").read_text())["warnings"]
+        source_sha = (root / ".pvs-source-sha").read_text().strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+            raise RuntimeError("Invalid source provenance")
         summary = {
-            "source_sha": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], text=True
-            ).strip(),
+            "source_sha": source_sha,
             "translation_units": len(selected),
             "positive_control": "V522",
             "warnings": len(warnings),

@@ -5,25 +5,35 @@ workflow:
 stages: [analyze]
 
 pvs:nat-ike:
+  image: quay.io/podman/stable@sha256:4daf0e142d865b333757440062d8e1fb15a6606238dadb7c6b69c224a4462d2d
   stage: analyze
   tags: [podman, shared]
   timeout: 45m
+  variables:
+    GIT_DEPTH: '100'
+    GIT_FETCH_EXTRA_FLAGS: --tags
   script:
     - test -n "$PVS_LICENSE_B64"
-    - podman build --build-arg GIT_SHA="$CI_COMMIT_SHA" --build-arg CREATED="$(date -u +%FT%TZ)" -t "localhost/vpp-pvs:$CI_JOB_ID" -f .ci/pvs/Containerfile .ci/pvs
     - |
-      podman run --rm --network none --cpus 2 --memory 6g \
-        -v "$PWD:$PWD:z" -w "$PWD" "localhost/vpp-pvs:$CI_JOB_ID" sh -ec '
-        cmake -S src -B build-pvs -G Ninja -DCMAKE_BUILD_TYPE=release \
-          -DCMAKE_C_COMPILER=/usr/bin/clang -DVPP_BUILD_NATIVE_ONLY=ON \
-          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-        cmake --build build-pvs --parallel 2 --target nat_plugin ikev2_plugin'
+      podman build --build-arg GIT_SHA="$CI_COMMIT_SHA" \
+        --build-arg VPP_DESCRIBE="$(git describe --long --match 'v*')" \
+        --build-arg CREATED="$(date -u +%FT%TZ)" \
+        --memory 6g --cpu-period 100000 --cpu-quota 200000 \
+        --ignorefile .ci/pvs/context.ignore \
+        -t "localhost/vpp-pvs:$CI_JOB_ID" -f .ci/pvs/Containerfile .
     - |
-      mkdir -p pvs-report
-      podman run --rm --network none --cpus 2 --memory 3g \
+      podman create --name "pvs-$CI_PROJECT_ID-$CI_JOB_ID" \
+        --network none --read-only --cpus 2 --memory 3g \
         --tmpfs /run/pvs:rw,noexec,nosuid,size=256m --env PVS_LICENSE_B64 \
-        -v "$PWD:$PWD:ro,z" -v "$PWD/pvs-report:$PWD/pvs-report:z" \
-        -w "$PWD" "localhost/vpp-pvs:$CI_JOB_ID" python3 .ci/pvs/analyze.py
+        --volume /work/pvs-report \
+        "localhost/vpp-pvs:$CI_JOB_ID" python3 .ci/pvs/analyze.py
+      analysis_status=0
+      podman start --attach "pvs-$CI_PROJECT_ID-$CI_JOB_ID" || analysis_status=$?
+      podman cp "pvs-$CI_PROJECT_ID-$CI_JOB_ID:/work/pvs-report" ./pvs-report
+      exit "$analysis_status"
+  after_script:
+    - podman rm --force --volumes "pvs-$CI_PROJECT_ID-$CI_JOB_ID"
+    - podman image rm "localhost/vpp-pvs:$CI_JOB_ID"
   artifacts:
     when: always
     expire_in: 14 days
