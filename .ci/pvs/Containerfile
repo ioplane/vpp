@@ -1,0 +1,33 @@
+FROM registry.fedoraproject.org/fedora@sha256:02031526999d46c9f9c6490eeccf4cafd735438b9d0fb5e1d9fc941d7886e2ff
+
+ARG GIT_SHA
+ARG CREATED
+LABEL org.opencontainers.image.title="EGW06 VPP Fedora analysis builder" \
+      org.opencontainers.image.description="Independent native Clang/GCC and PVS-Studio checks" \
+      org.opencontainers.image.source="https://github.com/ioplane/vpp" \
+      org.opencontainers.image.revision="$GIT_SHA" \
+      org.opencontainers.image.version="fedora46-pvs8.01.110904.869" \
+      org.opencontainers.image.created="$CREATED" \
+      org.opencontainers.image.licenses="NOASSERTION" \
+      org.opencontainers.image.base.name="registry.fedoraproject.org/fedora:46" \
+      org.opencontainers.image.base.digest="sha256:02031526999d46c9f9c6490eeccf4cafd735438b9d0fb5e1d9fc941d7886e2ff"
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+      binutils clang clang-tools-extra cmake gcc gcc-c++ git make ninja-build \
+      curl file diffutils patch tar xz which \
+      openssl-devel numactl-devel libunwind-devel elfutils-libelf-devel \
+      libnl3-devel libmnl-devel python3 python3-pip python3-ply python3-jsonschema \
+    && curl --fail --show-error --location \
+      https://files.pvs-studio.com/pvs-studio-8.01.110904.869-x86_64.rpm \
+      --output /tmp/pvs-studio.rpm \
+    && echo '79acea7166d63ee622d4bcbadf9f29750197ef21ffefc25b669eff65053bd866  /tmp/pvs-studio.rpm' \
+      | sha256sum --check - \
+    && dnf install -y --setopt=install_weak_deps=False /tmp/pvs-studio.rpm \
+    && dnf clean all \
+    && rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /opt/builder-rpms.txt
+
+RUN dnf install -y --setopt=install_weak_deps=False hostname wireshark-cli \
+    && dnf clean all \
+    && rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /opt/builder-rpms.txt
+
+WORKDIR /work

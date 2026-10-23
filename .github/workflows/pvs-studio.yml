@@ -1,0 +1,65 @@
+name: PVS-Studio NAT and IKE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/pvs-studio-2026-10-24]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    if: github.repository == 'ioplane/vpp'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ci/pvs-studio-2026-10-24
+          persist-credentials: false
+      - name: Require the license secret
+        env:
+          PVS_LICENSE_B64: ${{ secrets.PVS_LICENSE_B64 }}
+        run: test -n "$PVS_LICENSE_B64"
+      - name: Record analyzed source
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build the isolated toolchain
+        run: |
+          podman build --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+            --build-arg CREATED="$(date -u +%FT%TZ)" \
+            -t localhost/vpp-pvs -f .ci/pvs/Containerfile .ci/pvs
+      - name: Build native NAT and IKE
+        run: |
+          podman run --rm --network none --cpus 2 --memory 6g \
+            -v "$PWD:$PWD:z" -w "$PWD" localhost/vpp-pvs sh -ec '
+            cmake -S src -B build-pvs -G Ninja -DCMAKE_BUILD_TYPE=release \
+              -DCMAKE_C_COMPILER=/usr/bin/clang -DVPP_BUILD_NATIVE_ONLY=ON \
+              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+            cmake --build build-pvs --parallel 2 --target nat_plugin ikev2_plugin'
+      - name: Analyze with runtime-only credentials
+        env:
+          PVS_LICENSE_B64: ${{ secrets.PVS_LICENSE_B64 }}
+        run: |
+          mkdir -p pvs-report
+          podman run --rm --network none --cpus 2 --memory 3g \
+            --tmpfs /run/pvs:rw,noexec,nosuid,size=256m --env PVS_LICENSE_B64 \
+            -v "$PWD:$PWD:ro,z" -v "$PWD/pvs-report:$PWD/pvs-report:z" \
+            -w "$PWD" localhost/vpp-pvs python3 .ci/pvs/analyze.py
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: pvs-report/vpp.sarif
+          category: pvs-nat-ike
+          ref: refs/heads/ci/pvs-studio-2026-10-24
+          sha: ${{ steps.source.outputs.sha }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pvs-nat-ike
+          path: pvs-report/
+          if-no-files-found: ignore
+          retention-days: 14

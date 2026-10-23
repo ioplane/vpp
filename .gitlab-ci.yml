@@ -1,0 +1,32 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'
+
+stages: [analyze]
+
+pvs:nat-ike:
+  stage: analyze
+  tags: [podman, shared]
+  timeout: 45m
+  script:
+    - test -n "$PVS_LICENSE_B64"
+    - podman build --build-arg GIT_SHA="$CI_COMMIT_SHA" --build-arg CREATED="$(date -u +%FT%TZ)" -t "localhost/vpp-pvs:$CI_JOB_ID" -f .ci/pvs/Containerfile .ci/pvs
+    - |
+      podman run --rm --network none --cpus 2 --memory 6g \
+        -v "$PWD:$PWD:z" -w "$PWD" "localhost/vpp-pvs:$CI_JOB_ID" sh -ec '
+        cmake -S src -B build-pvs -G Ninja -DCMAKE_BUILD_TYPE=release \
+          -DCMAKE_C_COMPILER=/usr/bin/clang -DVPP_BUILD_NATIVE_ONLY=ON \
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        cmake --build build-pvs --parallel 2 --target nat_plugin ikev2_plugin'
+    - |
+      mkdir -p pvs-report
+      podman run --rm --network none --cpus 2 --memory 3g \
+        --tmpfs /run/pvs:rw,noexec,nosuid,size=256m --env PVS_LICENSE_B64 \
+        -v "$PWD:$PWD:ro,z" -v "$PWD/pvs-report:$PWD/pvs-report:z" \
+        -w "$PWD" "localhost/vpp-pvs:$CI_JOB_ID" python3 .ci/pvs/analyze.py
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths: [pvs-report/]
+    reports:
+      codequality: pvs-report/vpp.gitlab
