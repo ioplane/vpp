@@ -129,6 +129,13 @@ def main():
         log = analyze(database, "vpp")
         for kind in ("json", "sarif", "gitlab", "totals"):
             convert(log, kind, "GA:1,2,3", output / ("vpp." + kind))
+        codequality = output / "vpp.gitlab"
+        issues = json.loads(codequality.read_text())
+        for issue in issues:
+            issue["location"]["path"] = (
+                Path(issue["location"]["path"]).relative_to(root).as_posix()
+            )
+        codequality.write_text(json.dumps(issues) + "\n")
         warnings = json.loads((output / "vpp.json").read_text())["warnings"]
         summary = {
             "source_sha": subprocess.check_output(
