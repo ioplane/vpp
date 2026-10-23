@@ -7,12 +7,12 @@
 import base64
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 
 FILES = {
     "src/plugins/nat/nat44-ed/nat44_ed.c",
@@ -48,7 +48,12 @@ def main():
 
         def execute(arguments):
             result = subprocess.run(
-                arguments, cwd=work, text=True, capture_output=True, timeout=600
+                arguments,
+                check=False,
+                cwd=work,
+                text=True,
+                capture_output=True,
+                timeout=600,
             )
             return result.returncode, redact(result.stdout + result.stderr)
 
