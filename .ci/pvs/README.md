@@ -12,7 +12,10 @@ V522 positive control, exact input count, analyzer exit status, preprocessing
 errors and FAIL diagnostics are blocking. Existing GA diagnostics are reported
 without suppressions; a passing job is not a clean security review.
 Artifacts contain sanitized JSON, SARIF, GitLab Code Quality and totals.
-The license and raw analyzer logs remain in tmpfs and are not uploaded.
+The license file and raw analyzer logs remain in tmpfs and are not uploaded.
+The analyzer streams an allowlisted report archive on stdout; diagnostics and
+summary use stderr. This avoids stopped-volume copy differences between
+rootless and remote Podman. The analysis container is removed automatically.
 
 Source: [PVS-Studio full manual](https://pvs-studio.com/en/docs/manual/full/),
 retrieved 2026-10-24: GitHub Actions, GitLab CI/CD, Linux licensing,

@@ -22,17 +22,18 @@ pvs:nat-ike:
         --ignorefile .ci/pvs/context.ignore \
         -t "localhost/vpp-pvs:$CI_JOB_ID" -f .ci/pvs/Containerfile .
     - |
-      podman create --name "pvs-$CI_PROJECT_ID-$CI_JOB_ID" \
+      analysis_status=0
+      podman run --rm --name "pvs-$CI_PROJECT_ID-$CI_JOB_ID" \
         --network none --read-only --cpus 2 --memory 3g \
         --tmpfs /run/pvs:rw,noexec,nosuid,size=256m --env PVS_LICENSE_B64 \
-        --volume /work/pvs-report \
-        "localhost/vpp-pvs:$CI_JOB_ID" python3 .ci/pvs/analyze.py
-      analysis_status=0
-      podman start --attach "pvs-$CI_PROJECT_ID-$CI_JOB_ID" || analysis_status=$?
-      podman cp "pvs-$CI_PROJECT_ID-$CI_JOB_ID:/work/pvs-report" ./pvs-report
+        --tmpfs /work/pvs-report:rw,noexec,nosuid,size=64m \
+        "localhost/vpp-pvs:$CI_JOB_ID" python3 .ci/pvs/analyze.py > pvs-report.tar.gz || analysis_status=$?
+      mkdir -p pvs-report
+      tar -xzf pvs-report.tar.gz -C pvs-report
+      test -s pvs-report/summary.json && test -s pvs-report/vpp.gitlab && test -s pvs-report/vpp.sarif
       exit "$analysis_status"
   after_script:
-    - podman rm --force --volumes "pvs-$CI_PROJECT_ID-$CI_JOB_ID"
+    - if podman container exists "pvs-$CI_PROJECT_ID-$CI_JOB_ID"; then podman rm --force "pvs-$CI_PROJECT_ID-$CI_JOB_ID"; fi
     - podman image rm "localhost/vpp-pvs:$CI_JOB_ID"
   artifacts:
     when: always

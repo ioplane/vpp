@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+import tarfile
 import tempfile
 
 FILES = {
@@ -149,8 +151,23 @@ def main():
             "warning_policy": "report-only; no suppressions",
         }
         (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-        print(json.dumps(summary))
+        print(json.dumps(summary), file=sys.stderr)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        with tarfile.open(fileobj=sys.stdout.buffer, mode="w|gz") as archive:
+            for name in (
+                "control-process.log",
+                "vpp-process.log",
+                "summary.json",
+                "vpp.json",
+                "vpp.sarif",
+                "vpp.gitlab",
+                "vpp.totals",
+            ):
+                path = Path("pvs-report") / name
+                if path.is_file():
+                    archive.add(path, arcname=name)

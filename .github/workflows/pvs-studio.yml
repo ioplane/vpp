@@ -42,27 +42,31 @@ jobs:
         env:
           PVS_LICENSE_B64: ${{ secrets.PVS_LICENSE_B64 }}
         run: |
-          podman create --name "pvs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+          podman run --rm --name "pvs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --network none --read-only --cpus 2 --memory 3g \
             --tmpfs /run/pvs:rw,noexec,nosuid,size=256m --env PVS_LICENSE_B64 \
-            --volume /work/pvs-report \
-            localhost/vpp-pvs python3 .ci/pvs/analyze.py
-          podman start --attach "pvs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            --tmpfs /work/pvs-report:rw,noexec,nosuid,size=64m \
+            localhost/vpp-pvs python3 .ci/pvs/analyze.py > pvs-report.tar.gz
       - name: Retrieve reports and remove the licensed container
         if: always()
         run: |
           name="pvs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           if podman container exists "$name"; then
-            copy_status=0
-            podman cp "$name:/work/pvs-report" ./pvs-report || copy_status=$?
-            podman rm --force --volumes "$name"
-            exit "$copy_status"
+            podman rm --force "$name"
           fi
+          if test -s pvs-report.tar.gz; then
+            mkdir -p pvs-report
+            tar -xzf pvs-report.tar.gz -C pvs-report
+          fi
+      - name: Map SARIF to the checked-out source
+        run: |
+          jq --arg root "file://$PWD/" '.runs[].originalUriBaseIds.SRT.uri = $root' \
+            pvs-report/vpp.sarif > pvs-report/normalized.sarif
+          mv pvs-report/normalized.sarif pvs-report/vpp.sarif
       - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: pvs-report/vpp.sarif
           category: pvs-nat-ike
-          checkout_path: /work
           ref: refs/heads/ci/pvs-studio-2026-10-24
           sha: ${{ steps.source.outputs.sha }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
