@@ -3113,6 +3113,70 @@ class TestResponderGreReplayWindow(TestResponderGreTransportMode):
         self.assertIn(64, sizes)
 
 
+class TestResponderChildSaExhaustion(TestResponderPsk):
+    """Reject exhausted Child SA IDs and reuse a slot released by Delete."""
+
+    def test_responder(self):
+        super().test_responder()
+        child = self.sa.child_sas[0]
+        for first in range(1, 2048, 32):
+            packets = []
+            for slot in range(first, min(first + 32, 2048)):
+                child.ispi = (0x10000000 + slot).to_bytes(4, "big")
+                packets.append(self.create_rekey_request(rekey_notify=False))
+            self.send_and_expect(
+                self.pg0, packets, self.pg0, trace=False, log_packets=False
+            )
+
+        sa_index = self.vapi.ikev2_sa_dump()[0].sa.sa_index
+        self.assertEqual(len(self.vapi.ikev2_child_sa_dump(sa_index=sa_index)), 2048)
+        self.assertEqual(len(self.vapi.ipsec_sa_dump()), 4096)
+        child.ispi = (0x10000800).to_bytes(4, "big")
+        request = self.create_rekey_request(rekey_notify=False)
+        for _ in range(2):
+            reply = self.send_and_expect(self.pg0, [request], self.pg0)[0]
+            ih = self.get_ike_header(reply)
+            self.assertIn("Response", ih.flags)
+            self.assertEqual(ih.id, self.get_ike_header(request).id)
+            self.assertEqual(ih.exch_type, 36)
+            self.assertEqual(ih[ikev2.IKEv2_payload_Encrypted].next_payload, 41)
+            notify = ikev2.IKEv2_payload_Notify(self.sa.hmac_and_decrypt(ih))
+            self.assertEqual(notify.type, 35)  # NO_ADDITIONAL_SAS
+            self.assertEqual(notify.next_payload, 0)
+            self.assertEqual(
+                len(self.vapi.ikev2_child_sa_dump(sa_index=sa_index)), 2048
+            )
+            self.assertEqual(len(self.vapi.ipsec_sa_dump()), 4096)
+
+        header = ikev2.IKEv2(
+            init_SPI=self.sa.ispi,
+            resp_SPI=self.sa.rspi,
+            id=self.sa.new_msg_id(),
+            flags="Initiator",
+            exch_type="INFORMATIONAL",
+        )
+        delete = ikev2.IKEv2_payload_Delete(
+            proto="ESP", SPIsize=4, SPInum=1, SPIs=(0x10000400).to_bytes(4, "big")
+        )
+        packet = self.create_packet(
+            self.pg0,
+            self.encrypt_ike_msg(header, delete, "Delete"),
+            self.sa.sport,
+            self.sa.dport,
+            self.sa.natt,
+            self.ip6,
+        )
+        self.send_and_expect(self.pg0, [packet], self.pg0)
+        self.assertEqual(len(self.vapi.ipsec_sa_dump()), 4094)
+        reply = self.send_and_expect(
+            self.pg0, [self.create_rekey_request(rekey_notify=False)], self.pg0
+        )[0]
+        ih = self.get_ike_header(reply)
+        self.assertEqual(ih[ikev2.IKEv2_payload_Encrypted].next_payload, 33)  # SA
+        self.assertEqual(len(self.vapi.ikev2_child_sa_dump(sa_index=sa_index)), 2048)
+        self.assertEqual(len(self.vapi.ipsec_sa_dump()), 4096)
+
+
 class TestResponderGreNewChildDeleteOld(TestResponderPsk):
     """Deleting an old Child SA must preserve GRE protected by a newer one."""
 
