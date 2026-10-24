@@ -2432,6 +2432,7 @@ class TestInitiatorRequestWindowSize(TestInitiatorPsk):
     vpp_worker_count = 2
 
     def rekey_respond(self, req, update_child_sa_data):
+        old_ispi = self.sa.child_sas[0].ispi
         ih = self.get_ike_header(req)
         plain = self.sa.hmac_and_decrypt(ih)
         sa = ikev2.IKEv2_payload_SA(plain)
@@ -2455,6 +2456,19 @@ class TestInitiatorRequestWindowSize(TestInitiatorPsk):
         packet = self.create_packet(
             self.pg0, resp, self.sa.sport, self.sa.dport, self.sa.natt, self.ip6
         )
+        if update_child_sa_data:
+            deleted = self.get_ike_header(
+                self.send_and_expect(self.pg0, packet, self.pg0)[0]
+            )
+            self.assertEqual(deleted.exch_type, 37)
+            delete = ikev2.IKEv2_payload_Delete(self.sa.hmac_and_decrypt(deleted))
+            self.assertEqual(delete.proto, 3)
+            self.assertEqual(delete.SPIs, old_ispi)
+            header.exch_type = 37
+            header.id = deleted.id
+            packet = self.create_packet(
+                self.pg0, self.encrypt_ike_msg(header, b"", None)
+            )
         self.send_and_assert_no_replies(self.pg0, packet)
 
     def test_initiator(self):
