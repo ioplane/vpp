@@ -89,6 +89,22 @@ cp_key (u8 *dst, u8 *copied_len, u8 max_size, const u8 *src)
   clib_memcpy (dst, src, *copied_len);
 }
 
+#define CP_KEY(dst_keys, name, src_sa)                                        \
+  cp_key ((dst_keys)->name, &(dst_keys)->name##_len,                          \
+          sizeof ((dst_keys)->name), (src_sa)->name)
+
+static void
+cp_sa_keys (vl_api_ikev2_keys_t *k, const ikev2_sa_t *sa)
+{
+  CP_KEY (k, sk_d, sa);
+  CP_KEY (k, sk_ai, sa);
+  CP_KEY (k, sk_ar, sa);
+  CP_KEY (k, sk_ei, sa);
+  CP_KEY (k, sk_er, sa);
+  CP_KEY (k, sk_pi, sa);
+  CP_KEY (k, sk_pr, sa);
+}
+
 static void
 cp_auth (vl_api_ikev2_auth_t * vl_api_auth, ikev2_auth_t * auth)
 {
@@ -253,19 +269,7 @@ send_sa (ikev2_sa_t * sa, vl_api_ikev2_sa_dump_t * mp, u32 api_sa_index)
     if (tr)
       cp_sa_transform (&rsa->dh, tr);
 
-    cp_key (k->sk_d, &k->sk_d_len, sizeof (k->sk_d), sa->sk_d);
-
-    cp_key (k->sk_ai, &k->sk_ai_len, sizeof (k->sk_ai), sa->sk_ai);
-
-    cp_key (k->sk_ar, &k->sk_ar_len, sizeof (k->sk_ar), sa->sk_ar);
-
-    cp_key (k->sk_ei, &k->sk_ei_len, sizeof (k->sk_ei), sa->sk_ei);
-
-    cp_key (k->sk_er, &k->sk_er_len, sizeof (k->sk_er), sa->sk_er);
-
-    cp_key (k->sk_pi, &k->sk_pi_len, sizeof (k->sk_pi), sa->sk_pi);
-
-    cp_key (k->sk_pr, &k->sk_pr_len, sizeof (k->sk_pr), sa->sk_pr);
+    cp_sa_keys (k, sa);
 
     ikev2_copy_stats (&rsa->stats, &sa->stats);
 
@@ -332,19 +336,7 @@ send_sa_v2 (ikev2_sa_t *sa, vl_api_ikev2_sa_v2_dump_t *mp, u32 api_sa_index)
     if (tr)
       cp_sa_transform (&rsa->dh, tr);
 
-    cp_key (k->sk_d, &k->sk_d_len, sizeof (k->sk_d), sa->sk_d);
-
-    cp_key (k->sk_ai, &k->sk_ai_len, sizeof (k->sk_ai), sa->sk_ai);
-
-    cp_key (k->sk_ar, &k->sk_ar_len, sizeof (k->sk_ar), sa->sk_ar);
-
-    cp_key (k->sk_ei, &k->sk_ei_len, sizeof (k->sk_ei), sa->sk_ei);
-
-    cp_key (k->sk_er, &k->sk_er_len, sizeof (k->sk_er), sa->sk_er);
-
-    cp_key (k->sk_pi, &k->sk_pi_len, sizeof (k->sk_pi), sa->sk_pi);
-
-    cp_key (k->sk_pr, &k->sk_pr_len, sizeof (k->sk_pr), sa->sk_pr);
+    cp_sa_keys (k, sa);
 
     ikev2_copy_stats (&rsa->stats, &sa->stats);
 
@@ -414,19 +406,7 @@ send_sa_v3 (ikev2_sa_t *sa, vl_api_ikev2_sa_v3_dump_t *mp, u32 api_sa_index)
     if (tr)
       cp_sa_transform (&rsa->dh, tr);
 
-    cp_key (k->sk_d, &k->sk_d_len, sizeof (k->sk_d), sa->sk_d);
-
-    cp_key (k->sk_ai, &k->sk_ai_len, sizeof (k->sk_ai), sa->sk_ai);
-
-    cp_key (k->sk_ar, &k->sk_ar_len, sizeof (k->sk_ar), sa->sk_ar);
-
-    cp_key (k->sk_ei, &k->sk_ei_len, sizeof (k->sk_ei), sa->sk_ei);
-
-    cp_key (k->sk_er, &k->sk_er_len, sizeof (k->sk_er), sa->sk_er);
-
-    cp_key (k->sk_pi, &k->sk_pi_len, sizeof (k->sk_pi), sa->sk_pi);
-
-    cp_key (k->sk_pr, &k->sk_pr_len, sizeof (k->sk_pr), sa->sk_pr);
+    cp_sa_keys (k, sa);
 
     ikev2_copy_stats (&rsa->stats, &sa->stats);
 
