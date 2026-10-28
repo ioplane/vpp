@@ -106,6 +106,18 @@ cp_sa_keys (vl_api_ikev2_keys_t *k, const ikev2_sa_t *sa)
 }
 
 static void
+cp_child_sa_keys (vl_api_ikev2_keys_t *k, const ikev2_child_sa_t *child)
+{
+  CP_KEY (k, sk_ei, child);
+  CP_KEY (k, sk_er, child);
+  if (vec_len (child->sk_ai))
+    {
+      CP_KEY (k, sk_ai, child);
+      CP_KEY (k, sk_ar, child);
+    }
+}
+
+static void
 cp_auth (vl_api_ikev2_auth_t * vl_api_auth, ikev2_auth_t * auth)
 {
   vl_api_auth->method = auth->method;
@@ -461,16 +473,7 @@ send_child_sa (ikev2_child_sa_t * child,
     if (tr)
       cp_sa_transform (&rmp->child_sa.esn, tr);
 
-    cp_key (k->sk_ei, &k->sk_ei_len, sizeof (k->sk_ei), child->sk_ei);
-
-    cp_key (k->sk_er, &k->sk_er_len, sizeof (k->sk_er), child->sk_er);
-
-    if (vec_len (child->sk_ai))
-      {
-	cp_key (k->sk_ai, &k->sk_ai_len, sizeof (k->sk_ai), child->sk_ai);
-
-	cp_key (k->sk_ar, &k->sk_ar_len, sizeof (k->sk_ar), child->sk_ar);
-      }
+    cp_child_sa_keys (k, child);
 
     vl_api_ikev2_child_sa_t_endian (&rmp->child_sa, 1 /* to network */);
   });
@@ -528,16 +531,7 @@ send_child_sa_v2 (ikev2_child_sa_t *child, vl_api_ikev2_child_sa_v2_dump_t *mp,
     if (tr)
       cp_sa_transform (&rmp->child_sa.esn, tr);
 
-    cp_key (k->sk_ei, &k->sk_ei_len, sizeof (k->sk_ei), child->sk_ei);
-
-    cp_key (k->sk_er, &k->sk_er_len, sizeof (k->sk_er), child->sk_er);
-
-    if (vec_len (child->sk_ai))
-      {
-	cp_key (k->sk_ai, &k->sk_ai_len, sizeof (k->sk_ai), child->sk_ai);
-
-	cp_key (k->sk_ar, &k->sk_ar_len, sizeof (k->sk_ar), child->sk_ar);
-      }
+    cp_child_sa_keys (k, child);
 
     vl_api_ikev2_child_sa_v2_t_endian (&rmp->child_sa, 1 /* to network */);
   });
