@@ -5513,18 +5513,27 @@ ikev2_mngr_process_child_sa (vlib_main_t *vm, ikev2_sa_t *sa, ikev2_child_sa_t *
        };
 
        sw_if_index = km->ipip_tunnel_db_find_sw_if_index_fn_ptr (&key);
-
-       if (INDEX_INVALID == sw_if_index)
-	 return res;
 	}
 
-      u32 *sas_in = NULL;
-      vec_add1 (sas_in, csa->remote_sa_id);
+      /*
+       * Always release the old alternate SA reference the manager
+       * acquired for the handover window. The ipsec tunnel update
+       * only runs when a target tunnel interface still exists; a
+       * missing interface skips the update but must not leak the
+       * SA ref count. Both legs run under the worker barrier so
+       * that pool state remains consistent.
+       */
       vlib_worker_thread_barrier_sync (vm);
-      int rv = ipsec_tun_protect_update (sw_if_index, NULL,
-					 csa->local_sa_id, sas_in);
-      if (rv)
-	vec_free (sas_in);
+      if (INDEX_INVALID != sw_if_index)
+	{
+	  u32 *sas_in = NULL;
+	  vec_add1 (sas_in, csa->remote_sa_id);
+	  int rv =
+	    ipsec_tun_protect_update (sw_if_index, NULL, csa->local_sa_id,
+				      sas_in);
+	  if (rv)
+	    vec_free (sas_in);
+	}
       ipsec_sa_unlock_id (ikev2_flip_alternate_sa_bit (csa->remote_sa_id));
       vlib_worker_thread_barrier_release (vm);
     }
