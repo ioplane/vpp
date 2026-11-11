@@ -10,14 +10,13 @@
 #include <vnet/session/application.h>
 #include <vnet/tcp/tcp.h>
 #include <vppinfra/pool.h>
+#include <vppinfra/ring.h>
 
 #define HSI_TCP_TRACKER_MAGIC	      0x48534954
 #define HSI_TCP_DRAIN_INDEX_INVALID   ((u32) ~0)
 #define HSI_TCP_DRAIN_CACHE_MAX_BYTES (2 << 20)
 #define HSI_UDP_DRAIN_INDEX_INVALID   ((u32) ~0)
 #define HSI_UDP_DRAIN_CACHE_MAX_BYTES (2 << 20)
-
-STATIC_ASSERT (sizeof (uword) >= sizeof (u64), "hsi drain lookup requires 64-bit keys");
 
 typedef enum hsi_tracker_flags_
 {
@@ -42,6 +41,7 @@ typedef struct hsi_tcp_tracker_
   u64 packets;
   u64 bytes;
   u32 magic;
+  /* Updated atomically, peer's thread sets cleanup pending */
   hsi_tracker_flags_t flags;
   u32 peer_fin_ack;
   u32 peer_conn_index;
@@ -54,6 +54,9 @@ typedef struct hsi_tcp_tracker_
   u16 tx_lcl_port;
   u16 tx_rmt_port;
   i8 wnd_delta;
+  u8 pad_[3];
+  u32 next_node_opaque;
+  u32 peer_next_node_opaque;
 } hsi_tcp_tracker_t;
 
 #define HSI_TCP_TRACKER_OFFSET STRUCT_OFFSET_OF (tcp_connection_t, rcv_dupacks)
@@ -98,35 +101,30 @@ typedef struct hsi_udp_track_snapshot_
 
 struct hsi_udp_track_commit_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
   hsi_udp_track_snapshot_t peer;
 };
 
 struct hsi_udp_peer_update_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
   session_handle_t peer_session_handle;
 };
 
 typedef struct hsi_tcp_fin_ack_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
   u32 ack;
 } hsi_tcp_fin_ack_req_t;
 
 typedef struct hsi_tcp_peer_fin_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
   u32 ack;
 } hsi_tcp_peer_fin_req_t;
 
 struct hsi_session_fifos_cleanup_req_
 {
-  clib_thread_index_t owner_thread;
   svm_fifo_t *rx_fifo;
   svm_fifo_t *tx_fifo;
 };
@@ -145,6 +143,11 @@ typedef enum hsi_tcp_drain_flags_
   HSI_TCP_DRAIN_F_WND_CLAMPED = 1 << 2,
   HSI_TCP_DRAIN_F_ABORT_SENT = 1 << 3,
   HSI_TCP_DRAIN_F_COMMIT_SENT = 1 << 4,
+  HSI_TCP_DRAIN_F_HSI_CLOSED = 1 << 5,
+  /** Across workers, drain of the session hsi_track_pair was called on */
+  HSI_TCP_DRAIN_F_COMMITTER = 1 << 6,
+  HSI_TCP_DRAIN_F_READY_SENT = 1 << 7,
+  HSI_TCP_DRAIN_F_PEER_READY = 1 << 8,
 } hsi_tcp_drain_flags_t;
 
 typedef enum hsi_udp_drain_state_
@@ -180,17 +183,21 @@ struct hsi_tcp_drain_
   u32 tx_deq;
   u32 snd_una;
   u32 snd_nxt;
+  u32 rx_fifo_size; /**< rx fifo size before clamping it */
+  u32 rcv_wnd;	    /**< window advertised before clamping it */
   u32 cached_bytes;
   u32 *cached_buffers;
   hsi_tcp_drain_flags_t flags;
   hsi_tcp_drain_state_t state;
+  /** Committer only, snapshot the peer reported once drained */
+  hsi_tcp_track_snapshot_t peer_snapshot;
 };
 
 struct hsi_tcp_drain_start_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
   session_handle_t peer_session_handle;
+  hsi_track_flags_t flags;
 };
 
 struct hsi_udp_drain_
@@ -213,14 +220,13 @@ struct hsi_udp_drain_
 
 struct hsi_udp_drain_start_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
   session_handle_t peer_session_handle;
+  hsi_track_flags_t flags;
 };
 
 struct hsi_udp_drain_cache_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
   u32 buffer_index;
   u32 len;
@@ -231,6 +237,86 @@ hsi_worker_get (clib_thread_index_t thread_index)
 {
   return vec_elt_at_index (hsi_main.wrk, thread_index);
 }
+
+static_always_inline void
+hsi_rpc_count (hsi_worker_t *wrk, u8 is_self)
+{
+  if (is_self)
+    hsi_worker_counter_inc (wrk, rpc_self);
+  else
+    hsi_worker_counter_inc (wrk, rpc_remote);
+}
+
+/* Rpc to thread_index, also deferred if that's the current thread */
+static_always_inline void
+hsi_send_rpc_force (clib_thread_index_t thread_index, void *fp, void *arg)
+{
+  clib_thread_index_t cur_thread = vlib_get_thread_index ();
+
+  hsi_rpc_count (hsi_worker_get (cur_thread), thread_index == cur_thread);
+  session_send_rpc_evt_to_thread_force (thread_index, fp, arg);
+}
+
+/*
+ * Messages hsi workers send each other, or themselves to defer work. Each
+ * worker has one queue that all workers add to, see hsi_mq_send.
+ */
+#define foreach_hsi_msg                                                                            \
+  _ (TCP_DRAIN_START)                                                                              \
+  _ (TCP_TRACK_COMMIT)                                                                             \
+  _ (TCP_TRACK_READY)                                                                              \
+  _ (TCP_FIN_ACKED)                                                                                \
+  _ (TCP_PEER_FIN_PENDING)                                                                         \
+  _ (TCP_ABORT)                                                                                    \
+  _ (TCP_ABORT_SILENT)                                                                             \
+  _ (UDP_DRAIN_START)                                                                              \
+  _ (UDP_DRAIN_CACHE)                                                                              \
+  _ (UDP_TRACK_COMMIT)                                                                             \
+  _ (UDP_PEER_UPDATE)                                                                              \
+  _ (UDP_MIGRATED_CLEANUP)                                                                         \
+  _ (SESSION_CLEANUP)                                                                              \
+  _ (SESSION_CLEANUP_PAIR)                                                                         \
+  _ (SESSION_FIFOS_CLEANUP)
+
+typedef enum hsi_msg_type_
+{
+#define _(sym) HSI_MSG_##sym,
+  foreach_hsi_msg
+#undef _
+    HSI_MSG_N_TYPES,
+} hsi_msg_type_t;
+
+struct hsi_msg_
+{
+  hsi_msg_type_t type;
+  union
+  {
+    session_handle_t session_handle;
+    hsi_tcp_drain_start_req_t tcp_drain_start;
+    hsi_tcp_track_commit_req_t tcp_track_commit;
+    hsi_tcp_track_ready_req_t tcp_track_ready;
+    hsi_tcp_fin_ack_req_t tcp_fin_ack;
+    hsi_tcp_peer_fin_req_t tcp_peer_fin;
+    hsi_udp_drain_start_req_t udp_drain_start;
+    hsi_udp_drain_cache_req_t udp_drain_cache;
+    hsi_udp_track_commit_req_t udp_track_commit;
+    hsi_udp_peer_update_req_t udp_peer_update;
+    hsi_session_fifos_cleanup_req_t session_fifos_cleanup;
+  };
+};
+
+void hsi_mq_send (clib_thread_index_t thread_index, hsi_msg_t *msg);
+
+static_always_inline void
+hsi_mq_send_handle (clib_thread_index_t thread_index, hsi_msg_type_t type,
+		    session_handle_t session_handle)
+{
+  hsi_msg_t msg = { .type = type, .session_handle = session_handle };
+  hsi_mq_send (thread_index, &msg);
+}
+
+void hsi_tcp_handle_msg (hsi_msg_t *msg);
+void hsi_udp_handle_msg (hsi_msg_t *msg);
 
 static_always_inline uword
 hsi_session_conn_key (u32 session_index, u32 conn_index)
@@ -256,10 +342,42 @@ hsi_session_take_ownership (session_t *s)
   s->app_wrk_index = APP_INVALID_INDEX;
 }
 
+/* Closed sessions were handed back to the session layer for cleanup */
 static_always_inline u8
 hsi_session_is_hsi_owned (session_t *s)
 {
-  return s->app_wrk_index == APP_INVALID_INDEX;
+  return s->app_wrk_index == APP_INVALID_INDEX && s->session_state != SESSION_STATE_CLOSED;
+}
+
+/*
+ * If app wants cleanup notifications, save the app worker HSI takes the
+ * session from in al_index, which is only used by listeners. Must be called
+ * before HSI takes ownership of the session.
+ */
+static_always_inline void
+hsi_session_save_app_wrk (session_t *s, hsi_track_flags_t flags)
+{
+  if (flags & HSI_TRACK_F_NOTIFY_CLEANUP)
+    s->al_index = s->app_wrk_index;
+}
+
+/* No-op, i.e., session stays hsi owned, if no app worker was saved */
+static_always_inline void
+hsi_session_restore_app_wrk (session_t *s)
+{
+  s->app_wrk_index = s->al_index;
+}
+
+/*
+ * Sessions handed back to their app worker for cleanup notifications stay
+ * valid until the app is notified but their transport is already deleted.
+ */
+static_always_inline session_t *
+hsi_session_get_owned_if_valid (session_handle_tu_t sh)
+{
+  session_t *s = session_get_from_handle_if_valid (sh);
+
+  return s && hsi_session_is_hsi_owned (s) ? s : 0;
 }
 
 static_always_inline hsi_tcp_tracker_t *
@@ -272,7 +390,7 @@ static inline hsi_tcp_tracker_t *
 hsi_tcp_tracker_get (tcp_connection_t *tc)
 {
   ASSERT (tc->cfg_flags & TCP_CFG_F_TRACKED);
-  ASSERT (tc->state == TCP_STATE_CLOSED);
+  ASSERT (hsi_tcp_connection_is_committed (tc));
   return hsi_tcp_tracker_from_connection (tc);
 }
 
@@ -347,8 +465,8 @@ hsi_udp_session_conn_key_from_connection (udp_connection_t *uc)
 static_always_inline u8
 hsi_session_uses_remote_fifos (session_t *s)
 {
-  return (s->rx_fifo && s->rx_fifo->master_thread_index != s->thread_index) ||
-	 (s->tx_fifo && s->tx_fifo->master_thread_index != s->thread_index);
+  return (s->rx_fifo && segment_manager_fifo_alloc_thread (s->rx_fifo) != s->thread_index) ||
+	 (s->tx_fifo && segment_manager_fifo_alloc_thread (s->tx_fifo) != s->thread_index);
 }
 
 static_always_inline void
@@ -356,6 +474,22 @@ hsi_drain_sample_fifos (session_t *s, u32 *rx_deq, u32 *tx_deq)
 {
   *rx_deq = svm_fifo_max_dequeue (s->rx_fifo);
   *tx_deq = svm_fifo_max_dequeue_cons (s->tx_fifo);
+}
+
+static_always_inline void
+hsi_drain_program_tx (session_t *s)
+{
+  if (svm_fifo_max_dequeue_cons (s->tx_fifo) && svm_fifo_set_event (s->tx_fifo))
+    session_program_tx_io_evt (session_handle (s), SESSION_IO_EVT_TX);
+}
+
+/* Data received before hsi took over the session, the peer's tx fifo, is not
+ * forwarded by the app anymore, so the peer must send it */
+static_always_inline void
+hsi_drain_program_peer_tx (session_t *s, session_handle_t peer_handle)
+{
+  if (svm_fifo_max_dequeue (s->rx_fifo) && svm_fifo_set_event (s->rx_fifo))
+    session_program_tx_io_evt (peer_handle, SESSION_IO_EVT_TX);
 }
 
 static_always_inline u8
@@ -506,22 +640,32 @@ hsi_udp_drain_pool_put_index (hsi_worker_t *wrk, u32 drain_index)
 static_always_inline session_t *
 hsi_session_peer_get_if_valid (session_handle_tu_t sh)
 {
-  if (sh.thread_index == vlib_get_thread_index ())
-    return session_get_from_handle_if_valid (sh);
+  session_t *s;
 
-  return session_get_from_handle_safe (sh);
+  if (sh.thread_index == vlib_get_thread_index ())
+    s = session_get_from_handle_if_valid (sh);
+  else
+    s = session_get_from_handle_safe (sh);
+
+  /* Peer transport is gone, e.g., peer is waiting for app cleanup */
+  if (s && s->session_state == SESSION_STATE_TRANSPORT_DELETED)
+    return 0;
+
+  return s;
 }
 
 int hsi_track_sessions_compatible (session_t *s, session_t *peer_s);
-int hsi_track_tcp (session_t *s, session_t *peer_s);
-int hsi_track_udp (session_t *s, session_t *peer_s);
+int hsi_track_tcp (session_t *s, session_t *peer_s, hsi_track_flags_t flags);
+int hsi_track_udp (session_t *s, session_t *peer_s, hsi_track_flags_t flags);
 
 void hsi_session_cleanup_fifos (session_t *s);
+void hsi_session_release (session_t *s);
 void hsi_session_program_cleanup (session_t *s);
 void hsi_session_cleanup (session_t *s);
 void hsi_session_send_cleanup_pair (session_handle_t first);
 
 int hsi_tcp_session_is_cleanup_ready (session_t *s);
+void hsi_tcp_session_restore_fifos (session_t *s);
 session_handle_t hsi_tcp_session_cleanup_peer_handle (session_t *s);
 void hsi_tcp_session_cleanup_state (session_t *s);
 

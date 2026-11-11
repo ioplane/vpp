@@ -37,13 +37,16 @@ typedef enum transport_service_type_
  * CLESS: Connection is "connection less". Some important implications of that
  *        are that connections are not pinned to workers and listeners will
  *        have fifos associated to them
+ * SPLICED: Connection handed over to a tracker, e.g., hsi, that splices it to a
+ *          peer connection. Transport state is no longer used
  */
 #define foreach_transport_connection_flag                                                          \
   _ (IS_TX_PACED, "tx_paced")                                                                      \
   _ (NO_LOOKUP, "no_lookup")                                                                       \
   _ (DESCHED, "descheduled")                                                                       \
   _ (CLESS, "connectionless")                                                                      \
-  _ (ERROR, "error")
+  _ (ERROR, "error")                                                                               \
+  _ (SPLICED, "spliced")
 
 typedef enum transport_connection_flags_bits_
 {
@@ -398,10 +401,12 @@ typedef enum tls_cert_flags_
   TLS_CERT_F_CHAIN = 1 << 1,
 } tls_cert_flags_t;
 
+/* Certificates are borrowed from the transport and must not be freed by the
+ * caller. Clone them if needed beyond the synchronous attribute API call. */
 typedef struct tls_cert_
 {
-  void *cert;  /**< leaf cert, engine native; OpenSSL: caller-owned X509* */
-  void *chain; /**< cert chain, engine native; OpenSSL: borrowed STACK_OF(X509)* */
+  void *cert;  /**< borrowed leaf certificate, engine native */
+  void *chain; /**< borrowed certificate chain, engine native */
   u32 flags;   /**< requested on input and valid TLS_CERT_F_* values on output */
 } tls_cert_t;
 
@@ -441,6 +446,8 @@ typedef struct transport_endpt_ext_cfgs_
     .len = 0, .tail_offset = 0, .data = 0,                                    \
   }
 
+/* TLS_SERVER_NAME is get-only and returns a caller-owned vector without a
+ * trailing NUL. A missing SNI hostname is returned as a NULL vector. */
 #define foreach_transport_attr_fields                                                              \
   _ (u64, next_output_node, NEXT_OUTPUT_NODE)                                                      \
   _ (u16, mss, MSS)                                                                                \
@@ -451,7 +458,9 @@ typedef struct transport_endpt_ext_cfgs_
   _ (tls_alpn_proto_t, tls_alpn, TLS_ALPN)                                                         \
   _ (tls_profile_info_t, tls_profile_info, TLS_PROFILE_INFO)                                       \
   _ (u64, next_transport, NEXT_TRANSPORT)                                                          \
-  _ (u64, app_proto_err_code, APP_PROTO_ERR_CODE)
+  _ (u64, app_proto_err_code, APP_PROTO_ERR_CODE)                                                  \
+  _ (u8 *, tls_server_name, TLS_SERVER_NAME)                                                       \
+  _ (u64, app_proto_err_code_rx, APP_PROTO_ERR_CODE_RX)
 
 typedef enum transport_endpt_attr_type_
 {

@@ -318,6 +318,7 @@ _clib_socket_get_string (char **p, int is_hostname)
 	case '_':
 	  if (is_hostname)
 	    return s;
+	  /* fallthrough */
 	case 'a' ... 'z':
 	case 'A' ... 'Z':
 	case '0' ... '9':
@@ -432,6 +433,11 @@ clib_socket_init (clib_socket_t *s)
 	  p += 11;
 	  u8 *str = _clib_socket_get_string (&p, 0);
 	  u8 *pathname = 0;
+	  if (vec_len (str) == 0)
+	    {
+	      err = clib_error_return (0, "invalid netns name");
+	      goto done;
+	    }
 	  if (str[0] == '/')
 	    pathname = format (0, "%v%c", str, 0);
 	  else
@@ -480,7 +486,8 @@ clib_socket_init (clib_socket_t *s)
 
       if (setns (netns_fd, CLONE_NEWNET) < 0)
 	{
-	  close (fd);
+	  if (fd >= 0)
+	    close (fd);
 	  err = clib_error_return_unix (0, "setns(%d)", netns_fd);
 	  goto done;
 	}

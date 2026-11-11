@@ -453,28 +453,35 @@ F:	src/drivers
 Marvel Scalable mGig NICs Device driver
 I:	atlantic
 M:	Damjan Marion <dmarion@me.com>
-F:	src/drivers/atlantic/
+F:	src/drivers/net/atlantic/
 
 IAVF Device driver
 I:	iavf
 M:	Damjan Marion <damarion@cisco.com>
-F:	src/drivers/iavf/
+F:	src/drivers/net/iavf/
 
 IGE Device driver
 I:	ige
 M:	Damjan Marion <damarion@cisco.com>
-F:	src/drivers/ige/
+F:	src/drivers/net/ige/
 
 Marvell Armada device driver
 I:	armada
 M:	Damjan Marion <damarion@cisco.com>
-F:	src/drivers/armada/
+F:	src/drivers/net/armada/
 
-Marvell Octeon device driver
+Marvell Octeon device drivers
 I:	octeon
 M:	Monendra Singh Kushwaha <kmonendra@marvell.com>
 M:	Damjan Marion <damarion@cisco.com>
-F:	src/drivers/octeon/
+F:	src/drivers/net/octeon/
+F:	src/drivers/crypto/octeon/
+F:	src/drivers/common/octeon/
+
+Intel E8xx (ice) device driver
+I:	ice
+M:	Damjan Marion <dmarion@0xa5.net>
+F:	src/drivers/net/ice/
 
 Plugin - Dispatch Trace PCAP
 I:	dispatch-trace
@@ -754,6 +761,14 @@ M:	Dave Wallace <dwallacelf@gmail.com>
 M:	Aloys Augustin <aloaugus@cisco.com>
 M:	Nathan Skrzypczak <nathan.skrzypczak@gmail.com>
 F:	src/plugins/hs_apps/
+
+Plugin - SPDK NVMe/TCP Target
+I:	spdk
+M:	Jerome Tollet <jtollet@cisco.com>
+F:	src/plugins/spdk/
+F:	build/optional/packages/spdk.mk
+F:	build/optional/patches/spdk_*/
+F:	build/optional/spdk-env-vpp/
 
 Plugin - VPP Perf
 I:	vperf

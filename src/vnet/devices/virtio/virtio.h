@@ -117,6 +117,7 @@ typedef struct
   u8 *initial_if_name;
   u8 is_packed : 1;
   u8 consistent_qp : 1;
+  u8 va_dma : 1;
   u8 gso_enabled : 1;
   u8 csum_offload_enabled : 1;
   u8 rss_enabled : 1;
@@ -158,6 +159,25 @@ typedef struct
   u8 mac_filter[VIRTIO_PCI_MAC_TABLE_MAX_ENTRIES][6];
 } virtio_if_t;
 
+/*
+ * With VIRTIO_F_IOMMU_PLATFORM negotiated on a vfio device behind an IOMMU,
+ * the device addresses memory through the IOMMU, where vfio maps VPP's
+ * memory 1:1 to its virtual addresses. Otherwise the device addresses
+ * physical memory.
+ */
+static_always_inline u64
+virtio_dma_addr (vlib_main_t *vm, virtio_if_t *vif, void *p)
+{
+  return vif->va_dma ? pointer_to_uword (p) : vlib_physmem_get_pa (vm, p);
+}
+
+static_always_inline u64
+virtio_buffer_dma_addr (vlib_main_t *vm, virtio_if_t *vif, vlib_buffer_t *b)
+{
+  return vif->va_dma ? pointer_to_uword (vlib_buffer_get_current (b)) :
+		       vlib_buffer_get_current_pa (vm, b);
+}
+
 typedef struct
 {
   u32 gro_or_buffering_if_count;
@@ -176,7 +196,7 @@ clib_error_t *virtio_vring_init (vlib_main_t *vm, virtio_if_t *vif, u16 idx,
 				 u16 sz);
 void virtio_vring_set_rx_queues (vlib_main_t *vm, virtio_if_t *vif);
 void virtio_vring_set_tx_queues (vlib_main_t *vm, virtio_if_t *vif);
-extern void virtio_free_buffers (vlib_main_t *vm, vnet_virtio_vring_t *vring);
+extern void virtio_free_buffers (vlib_main_t *vm, vnet_virtio_vring_t *vring, int split_tx);
 extern void virtio_set_net_hdr_size (virtio_if_t * vif);
 extern void virtio_show (vlib_main_t *vm, u32 *hw_if_indices, u8 show_descr);
 clib_error_t *virtio_set_packet_buffering (virtio_if_t * vif, u16 size);

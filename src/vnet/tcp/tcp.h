@@ -121,7 +121,10 @@ typedef struct tcp_worker_ctx_
   /** worker timer wheel */
   tcp_timer_wheel_t timer_wheel;
 
-    CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
+  /** Sack blocks of an ack that reports a dsack */
+  sack_block_t ack_sacks[TCP_OPTS_MAX_SACK_BLOCKS];
+
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
 
   tcp_wrk_stats_t stats;
 } tcp_worker_ctx_t;
@@ -163,7 +166,7 @@ typedef struct tcp_configuration_
   /** Set if csum offloading is enabled */
   u8 csum_offload;
 
-  /** Enable D-SACK congestion undo for new connections */
+  /** Enable D-SACK reports and congestion undo for new connections */
   u8 enable_dsack;
 
   /** Enable byte tracking for new connections */
@@ -202,6 +205,9 @@ typedef struct tcp_configuration_
 
   /** Time to wait (tcp ticks) for syn-rcvd connection to establish */
   u32 syn_rcvd_time;
+
+  /** Time to wait (tcp ticks) for syn-sent connection to establish */
+  u32 syn_sent_time;
 
   /** Number of preallocated connections */
   u32 preallocated_connections;
@@ -325,7 +331,7 @@ void tcp_program_dupack (tcp_connection_t * tc);
 void tcp_program_retransmit (tcp_connection_t * tc);
 
 void tcp_update_burst_snd_vars (tcp_connection_t * tc);
-u32 tcp_snd_space (tcp_connection_t * tc);
+__clib_export u32 tcp_snd_space (tcp_connection_t *tc);
 __clib_export int tcp_fastrecovery_prr_snd_space (tcp_connection_t *tc);
 void tcp_reschedule (tcp_connection_t * tc);
 fib_node_index_t tcp_lookup_rmt_in_fib (tcp_connection_t * tc);

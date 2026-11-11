@@ -413,9 +413,9 @@ transport_icmp_dest_unreachable (vlib_main_t *vm, vlib_node_runtime_t *node,
       ip1 = vlib_buffer_get_current (b[0]);
       src_port = (u16 *) ip4_next_header (ip1);
       dst_port = src_port + 1;
-      s0 = session_lookup_safe4 (
-	vnet_buffer (b[0])->ip.fib_index, &ip0->dst_address, &ip0->src_address,
-	*src_port, *dst_port, transport_proto_from_ip_proto (ip1->protocol));
+      s0 = session_lookup_safe4 (vnet_buffer (b[0])->ip.fib_index, &ip0->dst_address,
+				 &ip0->src_address, *src_port, *dst_port,
+				 transport_proto_from_ip_proto (ip1->protocol), NULL);
       if (s0)
 	{
 	  /* direct calls here since vft used only for N to S notifications
@@ -506,10 +506,10 @@ transport_connect_stream (transport_proto_t tp, transport_endpoint_cfg_t *tep,
 }
 
 void
-transport_half_close (transport_proto_t tp, u32 conn_index, u8 thread_index)
+transport_half_close (transport_proto_t tp, u32 conn_index, u8 thread_index, u8 is_rx)
 {
   if (tp_vfts[tp].half_close)
-    tp_vfts[tp].half_close (conn_index, thread_index);
+    tp_vfts[tp].half_close (conn_index, thread_index, is_rx);
 }
 
 void

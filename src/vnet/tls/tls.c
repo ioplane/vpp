@@ -738,9 +738,12 @@ tls_connect (transport_endpoint_cfg_t * tep)
 }
 
 void
-tls_shutdown (u32 ctx_handle, clib_thread_index_t thread_index)
+tls_shutdown (u32 ctx_handle, clib_thread_index_t thread_index, u8 is_rx)
 {
   tls_ctx_t *ctx;
+
+  if (PREDICT_FALSE (is_rx))
+    return;
 
   TLS_DBG (1, "Disconnecting %x", ctx_handle);
 
@@ -1257,6 +1260,7 @@ tls_session_attribute (u32 ctx_handle, clib_thread_index_t thread_index,
   switch (attr->type)
     {
     case TRANSPORT_ENDPT_ATTR_TLS_PEER_CERT:
+    case TRANSPORT_ENDPT_ATTR_TLS_SERVER_NAME:
       if (tls_ctx_attribute (ctx, 1 /* is_get */, attr) < 0)
 	return -1;
       break;

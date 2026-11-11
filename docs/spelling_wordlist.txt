@@ -346,7 +346,6 @@ Enums
 eos
 epoll
 Erns
-ESP
 et
 etcd
 eth
@@ -1091,6 +1090,8 @@ socksvr
 sourceNATing
 sp
 spd
+spdk
+Spdk
 Specialisations
 spinlock
 spinlocks

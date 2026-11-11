@@ -705,8 +705,8 @@ hpack_encode_authority (u8 *dst, u8 *authority, u32 authority_len)
 static inline u8 *
 hpack_encode_content_len (u8 *dst, u64 content_len)
 {
-  u8 digit_buffer[20];
-  u8 *d = digit_buffer + sizeof (digit_buffer);
+  u8 digit_buffer[HTTP_U64_MAX_DECIMAL_DIGITS];
+  u8 *d = http_encode_u64_decimal (digit_buffer + sizeof (digit_buffer), content_len);
   u32 orig_len, actual_size;
   u8 *a, *b;
 
@@ -717,13 +717,6 @@ hpack_encode_content_len (u8 *dst, u64 content_len)
   /* static table index 28 */
   *b++ = 0x0F;
   *b++ = 0x0D;
-  do
-    {
-      *--d = '0' + content_len % 10;
-      content_len /= 10;
-    }
-  while (content_len);
-
   b = hpack_encode_string (b, d, digit_buffer + sizeof (digit_buffer) - d);
   actual_size = b - a;
   vec_set_len (dst, orig_len + actual_size);
@@ -752,6 +745,11 @@ hpack_serialize_response (u8 *app_headers, u32 app_headers_len,
   /* content length if any */
   if (control_data->content_len != HPACK_ENCODER_SKIP_CONTENT_LEN)
     p = hpack_encode_content_len (p, control_data->content_len);
+
+  /* ALT-SVC */
+  if (control_data->alt_svc)
+    p = hpack_encode_header (p, HTTP_HEADER_ALT_SVC, control_data->alt_svc,
+			     control_data->alt_svc_len, 0);
 
   if (!app_headers_len)
     {

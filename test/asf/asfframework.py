@@ -43,7 +43,7 @@ from log import (
     colorize,
 )
 from vpp_object import VppObjectRegistry
-from util import is_core_present
+from util import get_core_path, is_core_present, is_recent_core
 from test_result_code import TestResultCode
 
 logger = logging.getLogger(__name__)
@@ -643,8 +643,9 @@ class VppAsfTestCase(CPUInterface, unittest.TestCase):
 
     @classmethod
     def wait_for_coredump(cls):
-        corefile = cls.tempdir + "/core"
-        if os.path.isfile(corefile):
+        vpp = getattr(cls, "vpp", None)
+        corefile = get_core_path(cls.tempdir, vpp.pid if vpp else None)
+        if is_recent_core(corefile):
             cls.logger.error("Waiting for coredump to complete: %s", corefile)
             curr_size = os.path.getsize(corefile)
             deadline = time.time() + 60
@@ -1436,7 +1437,10 @@ class VppTestResult(unittest.TestResult):
             )
             self.symlink_failed()
             self.failed_test_cases_info.add(self.current_test_case_info)
-            if is_core_present(self.current_test_case_info.tempdir):
+            if is_core_present(
+                self.current_test_case_info.tempdir,
+                self.current_test_case_info.vpp_pid,
+            ):
                 if not self.current_test_case_info.core_crash_test:
                     if isinstance(test, unittest.suite._ErrorHolder):
                         test_name = str(test)
@@ -1802,8 +1806,24 @@ class Worker(Thread):
             else:
                 os.sched_setaffinity(0, range(os.cpu_count()))
 
+        # stdbuf injects libstdbuf.so via LD_PRELOAD. GNU stdbuf appends it
+        # to the caller's LD_PRELOAD; uutils (Rust) stdbuf (Ubuntu 26.04)
+        # overwrites it. Hide our LD_PRELOAD from stdbuf and sh, and have
+        # sh put it back in front of libstdbuf.so before exec'ing the app.
+        stdbuf_cmd = ["stdbuf", "-o0", "-e0"]
+        ld_preload = env.pop("LD_PRELOAD", None)
+        if ld_preload:
+            stdbuf_cmd += [
+                "/bin/sh",
+                "-c",
+                'export LD_PRELOAD="$1${LD_PRELOAD:+:$LD_PRELOAD}"; '
+                'shift; exec "$@"',
+                "sh",
+                ld_preload,
+            ]
+
         self.process = subprocess.Popen(
-            ["stdbuf", "-o0", "-e0"] + self.args,
+            stdbuf_cmd + self.args,
             shell=False,
             env=env,
             preexec_fn=_preexec,

@@ -243,9 +243,10 @@ vnet_crypto_process_ops (vlib_main_t *vm, vnet_crypto_op_t ops[], vnet_crypto_op
 
   while (n_left)
     {
-      while (ops[first_slot].status != VNET_CRYPTO_OP_STATUS_UNPROCESSED)
-	if (++first_slot == n_ops)
-	  return rv;
+      while (first_slot < n_ops && ops[first_slot].status != VNET_CRYPTO_OP_STATUS_UNPROCESSED)
+	first_slot++;
+      if (first_slot == n_ops)
+	return rv;
       rv += vnet_crypto_process_ops_one_batch (vm, ops, queue, op_q_sz, chunks, n_ops, first_slot,
 					       &n_left, 0);
     }
@@ -312,7 +313,7 @@ vnet_crypto_set_handlers (vnet_crypto_set_handlers_args_t *a)
   vnet_crypto_engine_t *e;
   vnet_crypto_alg_t alg;
   vnet_crypto_engine_id_t engine;
-  int i;
+  u8 i;
 
   p = hash_get_mem (cm->alg_index_by_name, a->handler_name);
   if (!p)
@@ -543,10 +544,12 @@ vnet_crypto_load_engines (vlib_main_t *vm)
 	  if (!ext || strncmp (ext, ".so", 3) != 0)
 	    {
 	      log_debug ("skipping %s, not .so", entry->d_name);
+	      continue;
 	    }
 	  vec_set_len (path, path_len);
 	  path = format (path, "/%s%c", entry->d_name, 0);
 
+	  /* coverity[leaked_storage] - engines stay loaded for the life of the process */
 	  if (!dlopen ((char *) path, RTLD_LAZY))
 	    {
 	      log_err ("failed to dlopen %s", path);

@@ -12,6 +12,7 @@
 #include <vnet/session/transport.h>
 #include <http/http.h>
 #include <http/http_buffer.h>
+#include <http/http1/chunked.h>
 
 #define HTTP_FIFO_THRESH (16 << 10)
 
@@ -63,13 +64,14 @@ typedef union
 
 STATIC_ASSERT (sizeof (http_conn_handle_t) == sizeof (u32), "must fit in u32");
 
-#define foreach_http_conn_state                                               \
-  _ (LISTEN, "LISTEN")                                                        \
-  _ (CONNECTING, "CONNECTING")                                                \
-  _ (ESTABLISHED, "ESTABLISHED")                                              \
-  _ (HALF_CLOSED, "HALF-CLOSED")                                              \
-  _ (TRANSPORT_CLOSED, "TRANSPORT-CLOSED")                                    \
-  _ (APP_CLOSED, "APP-CLOSED")                                                \
+#define foreach_http_conn_state                                                                    \
+  _ (LISTEN, "LISTEN")                                                                             \
+  _ (CONNECTING, "CONNECTING")                                                                     \
+  _ (ESTABLISHED, "ESTABLISHED")                                                                   \
+  _ (HALF_CLOSED, "HALF-CLOSED")                                                                   \
+  _ (TRANSPORT_CLOSED, "TRANSPORT-CLOSED")                                                         \
+  _ (APP_SHUTDOWN, "APP-SHUTDOWN")                                                                 \
+  _ (APP_CLOSED, "APP-CLOSED")                                                                     \
   _ (CLOSED, "CLOSED")
 
 typedef enum http_conn_state_ : u8
@@ -91,7 +93,8 @@ typedef enum http_conn_state_ : u8
   _ (8, UDP_TUNNEL, "udp tunnel")                                                                  \
   _ (9, UDP_TUNNEL_DRAFT03, "udp tunnel draft03")                                                  \
   _ (10, APP_IO_MORE_STREAMING_DATA, "app io more streaming data")                                 \
-  _ (11, TRANSPORT_IO_DROP, "transport io drop")
+  _ (11, TRANSPORT_IO_DROP, "transport io drop")                                                   \
+  _ (12, TRANSPORT_IO_MORE_STREAMING_DATA, "transport io more streaming data")
 
 typedef enum http_req_state_ : u8
 {
@@ -117,7 +120,13 @@ typedef enum http_target_form_ : u8
   _ (PENDING_SND_WIN_UPDATE, "pending-snd-win-update")                                             \
   _ (IS_TUNNEL, "is-tunnel")                                                                       \
   _ (CONNECT_UDP_DRAFT03, "connect-udp-draft03")                                                   \
-  _ (PEER_CLOSED, "peer-closed")
+  _ (PEER_CLOSED, "peer-closed")                                                                   \
+  _ (TX_STREAMING, "tx-streaming")                                                                 \
+  _ (TX_EOF, "tx-eof")                                                                             \
+  _ (RX_STREAMING, "rx-streaming")                                                                 \
+  _ (RX_EOF, "rx-eof")                                                                             \
+  _ (RX_PROCESSING, "rx-processing")                                                               \
+  _ (RX_HEADERS_RECEIVED, "rx-headers-received")
 
 typedef enum http_req_flags_bit_
 {
@@ -127,7 +136,7 @@ typedef enum http_req_flags_bit_
     HTTP_REQ_N_F_BITS
 } http_req_flags_bit_t;
 
-typedef enum http_req_flags_ : u8
+typedef enum http_req_flags_ : u16
 {
 #define _(sym, str) HTTP_REQ_F_##sym = 1 << HTTP_REQ_F_BIT_##sym,
   foreach_http_req_flags
@@ -171,7 +180,9 @@ typedef struct
   _ (EXPECT_PEER_SETTINGS, "expect-peer-settings")                                                 \
   _ (UDP_TUNNEL_DGRAM, "udp-tunnel-dgram")                                                         \
   _ (CONNECT_UDP_DRAFT03, "connect-udp-draft03")                                                   \
-  _ (TUNNEL_RX_CLOSED, "tunnel-rx-closed")
+  _ (TUNNEL_RX_CLOSED, "tunnel-rx-closed")                                                         \
+  _ (PENDING_LAST_CHUNK, "pending-last-chunk")                                                     \
+  _ (RX_CANCELLED, "rx-cancelled")
 
 typedef enum http_conn_flags_bit_
 {
@@ -347,6 +358,7 @@ typedef struct http_ctx_
       u32 timer_handle;
       u8 *app_name;
       u8 *host;
+      u8 *h3_alt_svc_port;
       http_conn_settings_t peer_settings;
       http_conn_settings_t settings;
       union
@@ -356,6 +368,7 @@ typedef struct http_ctx_
 	  /* http2 */
 	  u32 last_opened_stream_id;	/* host order */
 	  u32 last_processed_stream_id; /* network order */
+	  u32 continuation_stream_id;	/* network order */
 	  u32 peer_window;
 	  u32 our_window;
 	  u32 unsent_headers_offset;
@@ -379,6 +392,7 @@ typedef struct http_ctx_
 	  u32 peer_encoder_stream_index;
 	  u32 http_req_index;
 	  qpack_decoder_ctx_t qpack_decoder_ctx;
+	  u64 peer_max_push_id; /* HTTP_INVALID_VARINT until MAX_PUSH_ID is received */
 	};
       };
     };
@@ -426,13 +440,17 @@ typedef struct http_ctx_
 	  /* http1 */
 	  u32 body_offset;
 	  u32 rx_buf_offset; /* current offset during parsing */
+	  u32 http1_rx_staged_len; /* unpublished bytes after reserved http_msg_t */
+	  u8 http1_parse_state;
 	  u32 target_authority_offset;
 	  u32 target_authority_len;
 	  u32 host_header_index;
 	  u32 connection_header_index;
 	  u32 upgrade_header_index;
+	  u32 transfer_encoding_header_index;
 	  http_target_form_t target_form;
 	  http_url_scheme_t scheme;
+	  http1_chunked_decoder_t chunked_decoder;
 	};
 	struct
 	{
@@ -498,6 +516,7 @@ typedef struct http_worker_
   clib_llist_index_t sched_head;
   u32 h2_n_sessions;
   http_wrk_stats_t stats;
+  clib_timebase_t timebase; /* uses this thread's clock */
 } http_worker_t;
 
 typedef struct http_main_
@@ -510,8 +529,6 @@ typedef struct http_main_
   u8 **rx_bufs;
   u8 **tx_bufs;
   u8 **app_header_lists;
-
-  clib_timebase_t timebase;
 
   http_status_code_t *sc_by_u16;
   /*
@@ -526,6 +543,8 @@ typedef struct http_main_
   u64 add_seg_size;
   u32 fifo_size;
 
+  /* http/1 */
+  u32 h1_max_header_list_size;
   /* http/2 */
   http_conn_settings_t h2_settings;
   /* http/3 */
@@ -746,6 +765,9 @@ int http_connect_transport_stream (u32 parent_index, clib_thread_index_t thread_
  */
 void http_reset_transport_stream (http_ctx_t *stream);
 
+/** Stop receiving without closing TX or releasing the transport session. */
+int http_cancel_transport_stream_rx (http_ctx_t *stream, u64 error_code);
+
 /**
  * Close stream.
  *
@@ -955,6 +977,59 @@ http_io_as_max_write (http_ctx_t *req)
   return svm_fifo_max_enqueue_prod (as->rx_fifo);
 }
 
+always_inline int
+http_io_as_rx_provision (http_ctx_t *req, u32 offset, svm_fifo_seg_t *segs, u32 n_segs, u32 len)
+{
+  session_t *as = session_get (req->c_s_index, req->c_thread_index);
+  return svm_fifo_provision_chunks_at_offset (as->rx_fifo, offset, segs, n_segs, len);
+}
+
+/* Read unpublished data relative to the producer tail, independently of the consumer head. */
+always_inline u32
+http_io_as_rx_peek (http_ctx_t *req, u32 offset, u32 len, u8 *buf)
+{
+  svm_fifo_seg_t segs[2];
+  u32 copied = 0;
+  int n_segs;
+
+  while (copied < len)
+    {
+      n_segs = http_io_as_rx_provision (req, offset + copied, segs, ARRAY_LEN (segs), len - copied);
+      ASSERT (n_segs > 0);
+      for (int i = 0; i < n_segs; i++)
+	{
+	  clib_memcpy_fast (buf + copied, segs[i].data, segs[i].len);
+	  copied += segs[i].len;
+	}
+    }
+  return copied;
+}
+
+/* Publish the metadata and staged bytes with one release-store of the FIFO tail. */
+always_inline int
+http_io_as_rx_publish (http_ctx_t *req, const http_msg_t *msg, u32 len)
+{
+  session_t *as = session_get (req->c_s_index, req->c_thread_index);
+  svm_fifo_seg_t segs[2];
+  u32 copied = 0;
+  int n_segs;
+
+  while (copied < sizeof (*msg))
+    {
+      n_segs =
+	http_io_as_rx_provision (req, copied, segs, ARRAY_LEN (segs), sizeof (*msg) - copied);
+      if (n_segs < 0)
+	return n_segs;
+      for (int i = 0; i < n_segs; i++)
+	{
+	  clib_memcpy_fast (segs[i].data, (const u8 *) msg + copied, segs[i].len);
+	  copied += segs[i].len;
+	}
+    }
+  svm_fifo_enqueue_nocopy (as->rx_fifo, sizeof (*msg) + len);
+  return 0;
+}
+
 always_inline u32
 http_io_as_max_read (http_ctx_t *req)
 {
@@ -1086,6 +1161,17 @@ http_io_ts_read (http_ctx_t *hc, u8 *buf, u32 len, u8 peek)
   return (u32) n_read;
 }
 
+always_inline u32
+http_io_ts_peek (http_ctx_t *hc, u32 offset, u32 len, u8 *buf)
+{
+  int n_read;
+  session_t *ts = session_get_from_handle (hc->hc_tc_session_handle);
+
+  n_read = svm_fifo_peek (ts->rx_fifo, offset, len, buf);
+  ASSERT (n_read == len);
+  return (u32) n_read;
+}
+
 always_inline void
 http_io_ts_read_segs (http_ctx_t *hc, svm_fifo_seg_t *segs, u32 *n_segs, u32 max_bytes)
 {
@@ -1100,6 +1186,50 @@ http_io_ts_drain (http_ctx_t *hc, u32 len)
 {
   session_t *ts = session_get_from_handle (hc->hc_tc_session_handle);
   return svm_fifo_dequeue_drop (ts->rx_fifo, len);
+}
+
+/* Move bytes into unpublished app RX storage. Either segment array may map
+ * only part of the range; drain each copied prefix before mapping the next. */
+always_inline u32
+http_io_ts_move_to_as (http_ctx_t *hc, http_ctx_t *req, u32 offset, u32 len)
+{
+  svm_fifo_seg_t src[2], dst[2];
+  u32 total = 0, n_src, copied, si, di, src_offset, dst_offset, n;
+  int n_dst;
+
+  while (total < len)
+    {
+      n_src = ARRAY_LEN (src);
+      http_io_ts_read_segs (hc, src, &n_src, len - total);
+      n_dst = http_io_as_rx_provision (req, offset + total, dst, ARRAY_LEN (dst), len - total);
+      if (n_dst < 0)
+	break;
+
+      copied = si = di = src_offset = dst_offset = 0;
+      while (si < n_src && di < (u32) n_dst)
+	{
+	  n = clib_min (src[si].len - src_offset, dst[di].len - dst_offset);
+	  clib_memcpy_fast (dst[di].data + dst_offset, src[si].data + src_offset, n);
+	  copied += n;
+	  src_offset += n;
+	  dst_offset += n;
+	  if (src_offset == src[si].len)
+	    {
+	      si++;
+	      src_offset = 0;
+	    }
+	  if (dst_offset == dst[di].len)
+	    {
+	      di++;
+	      dst_offset = 0;
+	    }
+	}
+      if (!copied)
+	break;
+      http_io_ts_drain (hc, copied);
+      total += copied;
+    }
+  return total;
 }
 
 always_inline void
@@ -1242,10 +1372,9 @@ http_conn_upgrade_version (http_ctx_t *hc, http_version_t new_version)
 }
 
 always_inline int
-http_conn_accept_request (http_ctx_t *hc, http_ctx_t *req, u8 is_stream)
+http_conn_prepare_request (http_ctx_t *hc, http_ctx_t *req, u8 is_stream)
 {
   session_t *as, *asl, *asp;
-  app_worker_t *app_wrk;
   int rv;
 
   HTTP_DBG (1, "hc [%u]%x req %x", hc->c_thread_index, hc->hc_hc_index,
@@ -1269,8 +1398,6 @@ http_conn_accept_request (http_ctx_t *hc, http_ctx_t *req, u8 is_stream)
     {
       as->listener_handle = hc->hc_pa_session_handle;
       asl = session_get_from_handle_if_valid (hc->hc_pa_session_handle);
-      /* change hc_pa_session_handle to parent session */
-      hc->hc_pa_session_handle = session_handle (as);
     }
   /* the listener can go away while the handshake runs */
   if (PREDICT_FALSE (!asl || asl->session_state != SESSION_STATE_LISTENING))
@@ -1281,7 +1408,7 @@ http_conn_accept_request (http_ctx_t *hc, http_ctx_t *req, u8 is_stream)
     }
   as->session_type = asl->session_type;
 
-  /* init session fifos and notify app */
+  /* initialize session FIFOs; the caller decides when to notify the app */
   if ((rv = app_worker_init_accepted (as)))
     {
       HTTP_DBG (1, "failed to allocate fifos");
@@ -1293,15 +1420,39 @@ http_conn_accept_request (http_ctx_t *hc, http_ctx_t *req, u8 is_stream)
   /* now we can change it to parent */
   if (is_stream)
     as->listener_handle = hc->hc_pa_session_handle;
+  else
+    hc->hc_pa_session_handle = session_handle (as);
 
   req->hr_pa_wrk_index = as->app_wrk_index;
+  return 0;
+}
 
-  app_wrk = app_worker_get (as->app_wrk_index);
+always_inline int
+http_conn_notify_accept (http_ctx_t *req)
+{
+  session_t *as = session_get (req->c_s_index, req->c_thread_index);
+  app_worker_t *app_wrk = app_worker_get (as->app_wrk_index);
 
-  if ((rv = app_worker_accept_notify (app_wrk, as)))
+  return app_worker_accept_notify (app_wrk, as);
+}
+
+always_inline int
+http_conn_accept_request (http_ctx_t *hc, http_ctx_t *req, u8 is_stream)
+{
+  session_t *as;
+  int rv;
+
+  if ((rv = http_conn_prepare_request (hc, req, is_stream)))
+    return rv;
+
+  if ((rv = http_conn_notify_accept (req)))
     {
       HTTP_DBG (1, "app accept returned");
+      as = session_get (req->c_s_index, req->c_thread_index);
+      if (!is_stream)
+	hc->hc_pa_session_handle = as->listener_handle;
       req->c_s_index = SESSION_INVALID_INDEX;
+      segment_manager_dealloc_fifos (as->rx_fifo, as->tx_fifo);
       session_free (as);
       return rv;
     }

@@ -198,6 +198,19 @@ tcp_rcv_rst (tcp_worker_ctx_t * wrk, tcp_connection_t * tc)
     }
 }
 
+/* Report data below rcv_nxt received again. Returns 1 if a report is pending. */
+static __clib_noinline u8
+tcp_dsack_report_old (tcp_connection_t *tc, vlib_buffer_t *b)
+{
+  u32 seq = vnet_buffer (b)->tcp.seq_number;
+
+  if (!seq_lt (seq, tc->rcv_nxt))
+    return 0;
+
+  tcp_dsack_report (tc, seq, seq_min (vnet_buffer (b)->tcp.seq_end, tc->rcv_nxt));
+  return tcp_dsack_is_pending (tc);
+}
+
 /**
  * Validate incoming segment as per RFC793 p. 69 and RFC1323 p. 19
  *
@@ -237,7 +250,11 @@ tcp_segment_validate (tcp_worker_ctx_t * wrk, tcp_connection_t * tc0,
        * SEG.TSval */
       else if (!tcp_rst (th0))
 	{
-	  tcp_program_ack (tc0);
+	  /* An original delayed past its retransmission fails paws */
+	  if (tcp_dsack_report_old (tc0, b0))
+	    tcp_program_dupack (tc0);
+	  else
+	    tcp_program_ack (tc0);
 	  TCP_EVT (TCP_EVT_DUPACK_SENT, tc0, vnet_buffer (b0)->tcp);
 	  goto error;
 	}
@@ -298,6 +315,7 @@ tcp_segment_validate (tcp_worker_ctx_t * wrk, tcp_connection_t * tc0,
       /* If not RST, send dup ack */
       if (!tcp_rst (th0))
 	{
+	  tcp_dsack_report_old (tc0, b0);
 	  tcp_program_dupack (tc0);
 	  TCP_EVT (TCP_EVT_DUPACK_SENT, tc0, vnet_buffer (b0)->tcp);
 	}
@@ -661,12 +679,11 @@ static void
 tcp_cc_update (tcp_connection_t *tc, tcp_ack_ctx_t *ac)
 {
   ASSERT (!tcp_in_cong_recovery (tc) || tcp_is_lost_fin (tc));
+  /* Cumulative acks reach here only after the run of dupacks was reset */
+  ASSERT (!ac->bytes_acked || !tc->rcv_dupacks);
 
   /* Congestion avoidance */
   tcp_cc_rcv_ack (tc, ac);
-
-  /* If a cumulative ack, make sure dupacks is 0 */
-  tc->rcv_dupacks = 0;
 }
 
 /**
@@ -690,6 +707,11 @@ tcp_cc_handle_event (tcp_connection_t *tc, tcp_ack_ctx_t *ac)
    */
   if (!tcp_in_cong_recovery (tc))
     {
+      /* RFC 6675: reset on cumulative progress before counting any new sack evidence
+       * carried by the same ack. */
+      if (ac->bytes_acked)
+	tc->rcv_dupacks = 0;
+
       /* Undo a reduction proven spurious before tlp recovery replaces it */
       if (ac->ack_flags & TCP_ACK_F_DSACK_SPURIOUS)
 	tcp_loss_dsack_undo (tc);
@@ -716,9 +738,17 @@ tcp_cc_handle_event (tcp_connection_t *tc, tcp_ack_ctx_t *ac)
 
       tc->rcv_dupacks++;
       TCP_EVT (TCP_EVT_DUPACK_RCVD, tc, 1);
-      tcp_cc_rcv_cong_ack (tc, TCP_CC_DUPACK, ac);
+      u8 enter_recovery = tcp_loss_should_enter_recovery (tc, ac, has_sack);
 
-      if (tcp_loss_should_enter_recovery (tc, ac, has_sack))
+      /* With sack, a dupack may also ack new data (RFC 6675). CC sees it only
+       * once, as a cumulative ack in that case, so cwnd can still grow, but
+       * not if it starts recovery, which must reduce cwnd as it was */
+      if (ac->bytes_acked && !enter_recovery)
+	tcp_cc_rcv_ack (tc, ac);
+      else
+	tcp_cc_rcv_cong_ack (tc, TCP_CC_DUPACK, ac);
+
+      if (enter_recovery)
 	tcp_loss_enter_recovery (tc);
 
       return;
@@ -751,8 +781,8 @@ tcp_cc_handle_event (tcp_connection_t *tc, tcp_ack_ctx_t *ac)
       return;
     }
 
-  /* RFC6675: If the incoming ACK is a cumulative acknowledgment,
-   * reset dupacks to 0. Also needed if in congestion recovery */
+  /* Reset on cumulative progress after non-sack recovery accounting has
+   * consumed the previous dupack count. */
   tc->rcv_dupacks = 0;
 
   /* RFC 3522: Eifel spurious retransmit check */
@@ -784,13 +814,9 @@ tcp_ack_classify_duplicate (tcp_connection_t *tc, vlib_buffer_t *b, u32 prev_snd
   repeated = !ac->bytes_acked && vnet_buffer (b)->tcp.seq_end == vnet_buffer (b)->tcp.seq_number &&
 	     prev_snd_wnd == tc->snd_wnd;
 
+  /* TLP probe outcome detection uses repeated acks, congestion control only dupacks */
   flags |= repeated ? TCP_ACK_F_REPEATED : 0;
-  /* Per RFC 6675, an ACK that SACKs new data is a DupACK as well. A
-   * repeated ACK additionally needs outstanding data for congestion
-   * control, but not for TLP probe outcome detection. */
-  flags |= (ac->last_sacked_bytes || (repeated && seq_gt (tc->snd_nxt, tc->snd_una))) ?
-	     TCP_ACK_F_DUPACK :
-	     0;
+  flags |= tcp_loss_is_dupack (tc, ac, repeated) ? TCP_ACK_F_DUPACK : 0;
 
   return flags;
 }
@@ -799,7 +825,9 @@ tcp_ack_classify_duplicate (tcp_connection_t *tc, vlib_buffer_t *b, u32 prev_snd
 static_always_inline u32
 tcp_ack_needs_slow_path (tcp_connection_t *tc, tcp_ack_ctx_t *ac)
 {
-  return (ac->ack_flags & (TCP_ACK_F_DUPACK | TCP_ACK_F_DSACK_SPURIOUS | TCP_ACK_F_DETECT_LOSS |
+  /* A pending run of dupacks is handled on the slow path */
+  return tc->rcv_dupacks |
+	 (ac->ack_flags & (TCP_ACK_F_DUPACK | TCP_ACK_F_DSACK_SPURIOUS | TCP_ACK_F_DETECT_LOSS |
 			   TCP_ACK_F_TLP_RECOVERY)) |
 	 (tc->flags & (TCP_CONN_FAST_RECOVERY | TCP_CONN_RECOVERY | TCP_CONN_TLP_PENDING));
 }
@@ -1013,15 +1041,14 @@ tcp_rcv_fin (tcp_worker_ctx_t * wrk, tcp_connection_t * tc, vlib_buffer_t * b,
 
 /** Enqueue data for delivery to application */
 static int
-tcp_session_enqueue_data (tcp_connection_t * tc, vlib_buffer_t * b,
-			  u16 data_len)
+tcp_session_enqueue_data (tcp_connection_t *tc, vlib_buffer_t *b, u16 data_len)
 {
   int written, error = TCP_ERROR_ENQUEUED;
+  svm_fifo_enq_args_t args = {};
 
   ASSERT (seq_geq (vnet_buffer (b)->tcp.seq_number, tc->rcv_nxt));
   ASSERT (data_len);
-  written = session_enqueue_stream_connection (&tc->connection, b, 0,
-					       1 /* queue event */ , 1);
+  written = session_enqueue_stream_connection (&tc->connection, b, 1 /* queue event */, &args);
 
   TCP_EVT (TCP_EVT_INPUT, tc, 0, data_len, written);
 
@@ -1057,8 +1084,12 @@ tcp_session_enqueue_data (tcp_connection_t * tc, vlib_buffer_t * b,
   /* Update SACK list if need be */
   if (tcp_opts_sack_permitted (&tc->rcv_opts) && vec_len (tc->snd_sacks))
     {
-      /* Remove SACK blocks that have been delivered */
-      tcp_update_sack_list (tc, tc->rcv_nxt, tc->rcv_nxt);
+      /* written includes collected ooo bytes, so the segment started at rcv_nxt - written.
+       * Remove the blocks it delivered and report what it repeated of them */
+      u32 seq = tc->rcv_nxt - written;
+      tcp_update_sack_list (tc, tc->rcv_nxt, tc->rcv_nxt, seq, seq + data_len);
+      if (tcp_dsack_is_pending (tc))
+	tcp_program_dupack (tc);
     }
 
   return error;
@@ -1066,23 +1097,19 @@ tcp_session_enqueue_data (tcp_connection_t * tc, vlib_buffer_t * b,
 
 /** Enqueue out-of-order data */
 static int
-tcp_session_enqueue_ooo (tcp_connection_t * tc, vlib_buffer_t * b,
-			 u16 data_len)
+tcp_session_enqueue_ooo (tcp_connection_t *tc, vlib_buffer_t *b, u16 data_len)
 {
-  session_t *s0;
-  int rv, offset;
+  svm_fifo_enq_args_t args = { .offset = vnet_buffer (b)->tcp.seq_number - tc->rcv_nxt };
+  int rv;
 
   ASSERT (seq_gt (vnet_buffer (b)->tcp.seq_number, tc->rcv_nxt));
   ASSERT (data_len);
 
   /* Enqueue out-of-order data with relative offset */
-  rv = session_enqueue_stream_connection (&tc->connection, b,
-					  vnet_buffer (b)->tcp.seq_number -
-					  tc->rcv_nxt, 0 /* queue event */ ,
-					  0);
+  rv = session_enqueue_stream_connection (&tc->connection, b, 0 /* queue event */, &args);
 
   /* Nothing written */
-  if (rv)
+  if (rv < 0)
     {
       TCP_EVT (TCP_EVT_INPUT, tc, 1, data_len, 0);
       return TCP_ERROR_FIFO_FULL;
@@ -1094,22 +1121,19 @@ tcp_session_enqueue_ooo (tcp_connection_t * tc, vlib_buffer_t * b,
   /* Update SACK list if in use */
   if (tcp_opts_sack_permitted (&tc->rcv_opts))
     {
-      ooo_segment_t *newest;
-      u32 start, end;
+      u32 start, seq = vnet_buffer (b)->tcp.seq_number;
 
-      s0 = session_get (tc->c_s_index, tc->c_thread_index);
-
-      /* Get the newest segment from the fifo */
-      newest = svm_fifo_newest_ooo_segment (s0->rx_fifo);
-      if (newest)
+      if (args.dup_len < data_len)
 	{
-	  offset = ooo_segment_offset_prod (s0->rx_fifo, newest);
-	  ASSERT (offset <= vnet_buffer (b)->tcp.seq_number - tc->rcv_nxt);
-	  start = tc->rcv_nxt + offset;
-	  end = start + ooo_segment_length (s0->rx_fifo, newest);
-	  tcp_update_sack_list (tc, start, end);
-	  svm_fifo_newest_ooo_segment_reset (s0->rx_fifo);
+	  ASSERT (args.seg_offset <= seq - tc->rcv_nxt);
+	  start = tc->rcv_nxt + args.seg_offset;
+	  tcp_update_sack_list (tc, start, start + args.seg_len, seq, seq + data_len);
 	  TCP_EVT (TCP_EVT_CC_SACKS, tc);
+	}
+      else
+	{
+	  /* All of the data was queued already */
+	  tcp_dsack_report (tc, seq, seq + data_len);
 	}
     }
 
@@ -1188,11 +1212,16 @@ tcp_segment_rcv (tcp_worker_ctx_t * wrk, tcp_connection_t * tc,
 	   * retransmissions since we may not have any data to send */
 	  if (seq_leq (vnet_buffer (b)->tcp.seq_end, tc->rcv_nxt))
 	    {
+	      tcp_dsack_report_old (tc, b);
 	      tcp_program_dupack (tc);
 	      tc->errors.below_data_wnd++;
 	      error = TCP_ERROR_SEGMENT_OLD;
 	      goto done;
 	    }
+
+	  /* Report the duplicate prefix right away */
+	  if (tcp_dsack_report_old (tc, b))
+	    tcp_program_dupack (tc);
 
 	  /* Chop off the bytes in the past and see if what is left
 	   * can be enqueued in order */

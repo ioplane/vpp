@@ -9,13 +9,16 @@
 #include <vnet/ip/ip46_address.h>
 #include <vnet/session/session.h>
 
-#define HSI_TCP_DRAIN_CACHE_DEFAULT_PACKETS	  3
+#define HSI_TCP_DRAIN_CACHE_DEFAULT_PACKETS	  16
 #define HSI_TCP_DRAIN_NO_PROGRESS_DEFAULT_TIMEOUT 10.0
+/* Drains complete on events, timeouts are checked at this interval */
+#define HSI_TCP_DRAIN_SCAN_INTERVAL		  0.1
 #define HSI_UDP_DRAIN_CACHE_DEFAULT_PACKETS	  3
 #define HSI_UDP_DRAIN_NO_PROGRESS_DEFAULT_TIMEOUT 10.0
 #define HSI_UDP_IDLE_DEFAULT_TIMEOUT		  300.0
 #define HSI_TCP_FIN_WAIT_DEFAULT_TIMEOUT	  2.0
 #define HSI_POSTPONED_CLEANUP_TIME		  0.1
+#define HSI_MQ_DEFAULT_LENGTH			  4096
 
 typedef struct hsi_tcp_track_snapshot_
 {
@@ -28,19 +31,27 @@ typedef struct hsi_tcp_track_snapshot_
   u16 rmt_port;
   u32 snd_nxt;
   u32 rcv_nxt;
+  u32 snd_wnd;
   u32 ts_now;
   u32 tsval_recent;
   clib_thread_index_t thread_index;
   u8 rcv_wscale;
   u8 snd_wscale;
+  u32 next_node_opaque;
 } hsi_tcp_track_snapshot_t;
 
 typedef struct hsi_tcp_track_commit_req_
 {
-  clib_thread_index_t owner_thread;
   session_handle_t session_handle;
+  hsi_tcp_track_snapshot_t self;
   hsi_tcp_track_snapshot_t peer;
 } hsi_tcp_track_commit_req_t;
+
+typedef struct hsi_tcp_track_ready_req_
+{
+  session_handle_t session_handle;
+  hsi_tcp_track_snapshot_t snapshot;
+} hsi_tcp_track_ready_req_t;
 
 typedef struct hsi_tcp_drain_ hsi_tcp_drain_t;
 typedef struct hsi_tcp_drain_start_req_ hsi_tcp_drain_start_req_t;
@@ -52,14 +63,22 @@ typedef struct hsi_udp_peer_update_req_ hsi_udp_peer_update_req_t;
 typedef struct hsi_udp_drain_ hsi_udp_drain_t;
 typedef struct hsi_udp_drain_start_req_ hsi_udp_drain_start_req_t;
 typedef struct hsi_udp_drain_cache_req_ hsi_udp_drain_cache_req_t;
+typedef struct hsi_msg_ hsi_msg_t;
 
 #define foreach_hsi_wrk_stat                                                                       \
   _ (tcp_track_accepted, u64, "tcp-track-accepted")                                                \
   _ (tcp_track_failed, u64, "tcp-track-failed")                                                    \
+  _ (tcp_track_fail_peer, u64, "tcp-track-fail-peer")                                              \
+  _ (tcp_track_fail_closing, u64, "tcp-track-fail-closing")                                        \
+  _ (tcp_track_fail_peer_closing, u64, "tcp-track-fail-peer-closing")                              \
+  _ (tcp_track_fail_tracked, u64, "tcp-track-fail-tracked")                                        \
+  _ (tcp_track_fail_options, u64, "tcp-track-fail-options")                                        \
+  _ (tcp_track_fail_ooo, u64, "tcp-track-fail-ooo")                                                \
   _ (tcp_track_peer_rpc_failed, u64, "tcp-peer-rpc-failed")                                        \
   _ (tcp_drain_started, u64, "tcp-drain-started")                                                  \
   _ (tcp_drain_completed, u64, "tcp-drain-completed")                                              \
   _ (tcp_drain_stalled, u64, "tcp-drain-stalled")                                                  \
+  _ (tcp_drain_transport_closed, u64, "tcp-drain-transport-closed")                                \
   _ (tcp_drain_cached, u64, "tcp-drain-cached")                                                    \
   _ (tcp_drain_cache_overflow, u64, "tcp-drain-cache-overflow")                                    \
   _ (tcp_drain_cache_dropped, u64, "tcp-drain-cache-dropped")                                      \
@@ -72,19 +91,30 @@ typedef struct hsi_udp_drain_cache_req_ hsi_udp_drain_cache_req_t;
   _ (tcp_rst_cleanup, u64, "tcp-rst-cleanup")                                                      \
   _ (udp_track_accepted, u64, "udp-track-accepted")                                                \
   _ (udp_track_failed, u64, "udp-track-failed")                                                    \
+  _ (udp_track_fail_peer, u64, "udp-track-fail-peer")                                              \
+  _ (udp_track_fail_closing, u64, "udp-track-fail-closing")                                        \
+  _ (udp_track_fail_peer_closing, u64, "udp-track-fail-peer-closing")                              \
+  _ (udp_track_fail_tracked, u64, "udp-track-fail-tracked")                                        \
+  _ (udp_track_fail_unconnected, u64, "udp-track-fail-unconnected")                                \
   _ (udp_track_peer_rpc_failed, u64, "udp-peer-rpc-failed")                                        \
   _ (udp_track_migrated, u64, "udp-track-migrated")                                                \
   _ (udp_track_migration_failed, u64, "udp-track-migration-failed")                                \
   _ (udp_drain_started, u64, "udp-drain-started")                                                  \
   _ (udp_drain_completed, u64, "udp-drain-completed")                                              \
   _ (udp_drain_stalled, u64, "udp-drain-stalled")                                                  \
+  _ (udp_drain_transport_closed, u64, "udp-drain-transport-closed")                                \
   _ (udp_drain_cached, u64, "udp-drain-cached")                                                    \
   _ (udp_drain_cache_overflow, u64, "udp-drain-cache-overflow")                                    \
   _ (udp_drain_cache_dropped, u64, "udp-drain-cache-dropped")                                      \
   _ (udp_drain_cache_flushed, u64, "udp-drain-cache-flushed")                                      \
   _ (udp_idle_timeout, u64, "udp-idle-timeout")                                                    \
   _ (udp_idle_cleanup_scheduled, u64, "udp-idle-cleanup-scheduled")                                \
-  _ (udp_cleanup_completed, u64, "udp-cleanup-completed")
+  _ (udp_cleanup_completed, u64, "udp-cleanup-completed")                                          \
+  _ (rpc_remote, u64, "rpc-remote")                                                                \
+  _ (rpc_self, u64, "rpc-self")                                                                    \
+  _ (mq_msgs, u64, "mq-msgs")                                                                      \
+  _ (mq_doorbells, u64, "mq-doorbells")                                                            \
+  _ (mq_full, u64, "mq-full")
 
 typedef struct hsi_worker_stats_
 {
@@ -99,28 +129,32 @@ typedef struct hsi_cleanup_req_
   session_handle_t sh;
 } hsi_cleanup_req_t;
 
+typedef struct hsi_tcp_fin_wait_elt_
+{
+  uword key;
+  f64 start;
+} hsi_tcp_fin_wait_elt_t;
+
 typedef struct hsi_worker_
 {
-  hsi_tcp_track_commit_req_t *tcp_track_commit_reqs;
-  hsi_tcp_drain_start_req_t *tcp_drain_start_reqs;
-  hsi_tcp_fin_ack_req_t *tcp_fin_ack_reqs;
-  hsi_tcp_peer_fin_req_t *tcp_peer_fin_reqs;
-  hsi_session_fifos_cleanup_req_t *session_fifos_cleanup_reqs;
+  /** Messages from other workers, or this one, see hsi_mq_send */
+  clib_spinlock_t mq_lock;
+  hsi_msg_t *mq;
+  /** Messages being handled, owned by this worker */
+  hsi_msg_t *mq_msgs;
   hsi_tcp_drain_t *tcp_drains;
   uword *tcp_drain_by_session_conn;
   session_handle_t *tcp_drain_update_handles;
+  f64 tcp_drain_next_scan;
   uword *tcp_fin_wait_by_session_conn;
-  uword *tcp_fin_wait_update_keys;
+  /** Fin-wait entries in the order they expire, deleted ones included */
+  hsi_tcp_fin_wait_elt_t *tcp_fin_wait_fifo;
   hsi_worker_stats_t stats;
   u8 tcp_drain_time_registered;
   u8 tcp_drain_time_unregister_pending;
   u8 tcp_fin_wait_time_registered;
   u8 tcp_fin_wait_time_unregister_pending;
   uword *udp_track_peer_by_session_conn;
-  hsi_udp_track_commit_req_t *udp_track_commit_reqs;
-  hsi_udp_peer_update_req_t *udp_peer_update_reqs;
-  hsi_udp_drain_start_req_t *udp_drain_start_reqs;
-  hsi_udp_drain_cache_req_t *udp_drain_cache_reqs;
   hsi_udp_drain_t *udp_drains;
   uword *udp_drain_by_session_conn;
   session_handle_t *udp_drain_update_handles;
@@ -177,11 +211,14 @@ typedef struct hsi_main_
   f64 udp_idle_timeout;
   f64 tcp_fin_wait_timeout;
   f64 postponed_cleanup_time;
+  u32 mq_length;
 
   /* ipv4 and ipv6 for tcp and udp */
   session_handle_t intercept_listeners[2][2];
 } hsi_main_t;
 
 extern hsi_main_t hsi_main;
+
+void hsi_mq_init (hsi_worker_t *wrk);
 
 #endif /* SRC_PLUGINS_HSI_HSI_TYPES_H_ */

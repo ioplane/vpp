@@ -13,6 +13,7 @@ import traceback
 import signal
 import re
 import warnings
+import multiprocessing
 from multiprocessing import Process, Pipe, get_context
 from multiprocessing.queues import Queue
 from multiprocessing.managers import BaseManager
@@ -48,10 +49,13 @@ from discover_tests import discover_tests
 import sanity_run_vpp
 from subprocess import check_output, CalledProcessError
 from util import (
+    check_core_dir,
     check_core_path,
     extract_coredumpctl_core,
     get_core_path,
     is_core_present,
+    is_recent_core,
+    set_ci_core_pattern,
     uses_coredumpctl,
 )
 
@@ -285,6 +289,7 @@ class TestCaseWrapper(object):
                 test_name,
                 self.last_test_vpp_binary,
                 self.last_test_temp_dir,
+                self.vpp_pid,
             )
 
     def close_pipes(self):
@@ -397,16 +402,14 @@ def _handle_failed_suite(logger, last_test_temp_dir, vpp_pid, vpp_binary):
         # PollHook normally materializes core.<pid> already; this pulls it out
         # of systemd storage as a fallback for when the child died before it
         # could (so we still get a decoded backtrace post-mortem).
-        if uses_coredumpctl() and not is_core_present(last_test_temp_dir):
+        if uses_coredumpctl() and not is_core_present(last_test_temp_dir, vpp_pid):
             # Single shot, no waiting: a suite reaches here for any failure
             # (including a clean FAILFAST winddown), so most of the time there
             # is no core and we must not stall polling systemd for one.
             extract_coredumpctl_core(logger, last_test_temp_dir, vpp_pid, wait=False)
-        core_path = get_core_path(last_test_temp_dir)
-        if os.path.exists(core_path):
-            logger.error(
-                "Core-file exists in test temporary directory: %s!" % core_path
-            )
+        core_path = get_core_path(last_test_temp_dir, vpp_pid)
+        if is_recent_core(core_path):
+            logger.error("VPP core-file found: %s!" % core_path)
             check_core_path(logger, core_path)
             logger.debug("Running 'file %s':" % core_path)
             try:
@@ -444,27 +447,30 @@ def _handle_failed_suite(logger, last_test_temp_dir, vpp_pid, vpp_binary):
             shutil.copy2(api_post_mortem_path, last_test_temp_dir)
 
 
-def check_and_handle_core(vpp_binary, tempdir, core_crash_test):
-    if is_core_present(tempdir):
+def check_and_handle_core(
+    vpp_binary: str, tempdir: str, core_crash_test: str, vpp_pid: int | None = None
+) -> None:
+    core_path = get_core_path(tempdir, vpp_pid)
+    if is_recent_core(core_path):
         if debug_core:
             print(
                 "VPP core detected in %s. Last test running was %s"
                 % (tempdir, core_crash_test)
             )
             print(single_line_delim)
-            spawn_gdb(vpp_binary, get_core_path(tempdir))
+            spawn_gdb(vpp_binary, core_path)
             print(single_line_delim)
         elif config.compress_core:
-            print("Compressing core-file in test directory `%s'" % tempdir)
-            os.system("gzip %s" % get_core_path(tempdir))
+            print("Compressing core-file `%s'" % core_path)
+            os.system("gzip %s" % core_path)
 
 
 def handle_cores(failed_testcases):
     for failed_testcase in failed_testcases:
         tcs_with_core = failed_testcase.testclasess_with_core
         if tcs_with_core:
-            for test, vpp_binary, tempdir in tcs_with_core.values():
-                check_and_handle_core(vpp_binary, tempdir, test)
+            for test, vpp_binary, tempdir, vpp_pid in tcs_with_core.values():
+                check_and_handle_core(vpp_binary, tempdir, test, vpp_pid)
 
 
 def get_suite_key(testcase_suite):
@@ -726,7 +732,10 @@ def run_forked(testcase_suites):
                     wrapped_testcase_suite.last_test_temp_dir
                     and wrapped_testcase_suite.last_test_vpp_binary
                 ):
-                    if is_core_present(wrapped_testcase_suite.last_test_temp_dir):
+                    if is_core_present(
+                        wrapped_testcase_suite.last_test_temp_dir,
+                        wrapped_testcase_suite.vpp_pid,
+                    ):
                         wrapped_testcase_suite.add_testclass_with_core()
                         if wrapped_testcase_suite.core_detected_at is None:
                             wrapped_testcase_suite.core_detected_at = time.time()
@@ -1317,6 +1326,18 @@ def parse_results(results, write_failed_file=True):
 
 
 if __name__ == "__main__":
+    # The test framework is built around fork semantics: worker processes
+    # are forked from the controller, so they inherit its already-imported
+    # modules and global state (scapy layer bindings, class monkey-patches,
+    # preloaded VPP API tables), and RemoteClass shares a Pipe with its
+    # child through fork rather than pickling.
+    # Python 3.14 changed the default multiprocessing start method on Linux
+    # from "fork" to "forkserver", which spawns fresh workers that lack that
+    # inherited state and cannot receive a RemoteClass by pickling. Pin fork
+    # so behavior is identical across Python versions.
+    if "fork" in multiprocessing.get_all_start_methods():
+        multiprocessing.set_start_method("fork", force=True)
+
     print(f"Config is: {config}")
 
     if config.list:
@@ -1327,6 +1348,13 @@ if __name__ == "__main__":
 
     if config.api_preload:
         VPPApiJSONFiles.load_api(apidir=config.extern_apidir + [config.vpp_install_dir])
+
+    core_pattern_set, msg = set_ci_core_pattern()
+    print(msg if core_pattern_set else f"core_pattern not set: {msg}")
+
+    core_dir_warning = check_core_dir()
+    if core_dir_warning:
+        print(colorize(f"WARNING: {core_dir_warning}", YELLOW))
 
     if config.sanity:
         print("Running sanity test case.")
@@ -1479,6 +1507,7 @@ if __name__ == "__main__":
                         test_case_info.vpp_bin_path,
                         test_case_info.tempdir,
                         test_case_info.core_crash_test,
+                        test_case_info.vpp_pid,
                     )
 
         if cpu_shortage:

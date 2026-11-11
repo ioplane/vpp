@@ -395,7 +395,7 @@ ct_fwrk_flush_connects (void *rpc_args)
   clib_thread_index_t thread_index, fwrk_index, n_workers;
   ct_main_t *cm = &ct_main;
   ct_worker_t *wrk;
-  u8 need_rpc = 0;
+  u8 need_rpc;
 
   fwrk_index = cm->fwrk_thread;
   n_workers = vec_len (cm->fwrk_pending_connects);
@@ -405,6 +405,7 @@ ct_fwrk_flush_connects (void *rpc_args)
       if (!vec_len (cm->fwrk_pending_connects[thread_index]))
 	continue;
 
+      need_rpc = 0;
       wrk = ct_worker_get (thread_index);
 
       /* Connects can be done without worker barrier, grab dst worker lock */
@@ -724,9 +725,12 @@ ct_program_cleanup (ct_connection_t *ct)
 }
 
 static void
-ct_session_half_close (u32 ct_index, clib_thread_index_t thread_index)
+ct_session_half_close (u32 ct_index, clib_thread_index_t thread_index, u8 is_rx)
 {
   ct_connection_t *ct, *peer_ct;
+
+  if (PREDICT_FALSE (is_rx))
+    return;
 
   ct = ct_connection_get (ct_index, thread_index);
   if (!ct)

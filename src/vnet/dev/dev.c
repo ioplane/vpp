@@ -8,6 +8,8 @@
 #include <vnet/dev/dev.h>
 #include <vnet/dev/log.h>
 #include <vnet/dev/counters.h>
+#include <vlib/buffer_funcs.h>
+#include <vlib/physmem_funcs.h>
 #include <vppinfra/unix.h>
 #include <dlfcn.h>
 #include <dirent.h>
@@ -160,6 +162,72 @@ vnet_dev_cleanup_bus_resources (vlib_main_t *vm, vnet_dev_t *dev)
   vec_reset_length (dev->dma_allocs);
 }
 
+static int
+vnet_dev_dma_range_fits (u64 dma_start, u64 size, u64 dma_max)
+{
+  return size && dma_start <= dma_max && size - 1 <= dma_max - dma_start;
+}
+
+static vnet_dev_rv_t
+vnet_dev_check_dma_address_space (vlib_main_t *vm, vnet_dev_t *dev)
+{
+  vnet_dev_main_t *dm = &vnet_dev_main;
+  vnet_dev_driver_t *driver = pool_elt_at_index (dm->drivers, dev->driver_index);
+  vlib_buffer_pool_t *buffer_pool;
+  vlib_physmem_map_t *map;
+  u8 dma_bits = driver->registration->device.dma_address_space_bits;
+  u64 dma_max;
+  u64 dma_start;
+  u64 size;
+  u32 i;
+
+  if (dma_bits == 0)
+    return VNET_DEV_OK;
+  if (dma_bits > 64)
+    {
+      log_err (dev, "invalid DMA address space size %u bits", dma_bits);
+      return VNET_DEV_ERR_NOT_SUPPORTED;
+    }
+
+  dma_max = dma_bits == 64 ? ~0ULL : (1ULL << dma_bits) - 1;
+
+  vec_foreach (buffer_pool, vm->buffer_main->buffer_pools)
+    {
+      map = vlib_physmem_get_map (vm, buffer_pool->physmem_map_index);
+      if (dev->va_dma)
+	{
+	  dma_start = pointer_to_uword (map->base);
+	  size = (u64) map->n_pages << map->log2_page_size;
+	  if (!vnet_dev_dma_range_fits (dma_start, size, dma_max))
+	    {
+	      log_err (
+		dev,
+		"VPP buffer pool %u physmem map %u DMA range at 0x%llx with size %llu exceeds "
+		"the %u-bit device address space",
+		buffer_pool->index, buffer_pool->physmem_map_index, dma_start, size, dma_bits);
+	      return VNET_DEV_ERR_NOT_SUPPORTED;
+	    }
+	}
+      else
+	for (i = 0; i < vec_len (map->page_table); i++)
+	  {
+	    dma_start = map->page_table[i];
+	    size = 1ULL << map->log2_page_size;
+	    if (!vnet_dev_dma_range_fits (dma_start, size, dma_max))
+	      {
+		log_err (dev,
+			 "VPP buffer pool %u physmem map %u page %u DMA range at 0x%llx with size "
+			 "%llu exceeds the %u-bit device address space",
+			 buffer_pool->index, buffer_pool->physmem_map_index, i, dma_start, size,
+			 dma_bits);
+		return VNET_DEV_ERR_NOT_SUPPORTED;
+	      }
+	  }
+    }
+
+  return VNET_DEV_OK;
+}
+
 vnet_dev_rv_t
 vnet_dev_init (vlib_main_t *vm, vnet_dev_t *dev)
 {
@@ -171,6 +239,10 @@ vnet_dev_init (vlib_main_t *vm, vnet_dev_t *dev)
 
   if ((rv = bus->ops.device_open (vm, dev)) != VNET_DEV_OK)
     return rv;
+
+  rv = vnet_dev_check_dma_address_space (vm, dev);
+  if (rv != VNET_DEV_OK)
+    goto failed;
 
   if (dev->ops.alloc)
     {
@@ -537,7 +609,7 @@ vnet_dev_main_init (vlib_main_t *vm)
       driver->bus_index = bus_index;
       driver->ops = r->device.ops;
       dev_class = clib_mem_alloc (sizeof (vnet_device_class_t));
-      *dev_class = (vnet_device_class_t){
+      *dev_class = (vnet_device_class_t) {
 	.name = r->name,
 	.format_device_name = format_vnet_dev_interface_name,
 	.format_device = format_vnet_dev_interface_info,
@@ -550,6 +622,7 @@ vnet_dev_main_init (vlib_main_t *vm)
 	.format_flow = format_vnet_dev_flow,
 	.set_rss_queues_function = vnet_dev_interface_set_rss_queues,
 	.set_link_speed_function = vnet_dev_port_set_link_speed,
+	.eeprom_read_function = vnet_dev_port_eeprom_read,
       };
       driver->dev_class_index = vnet_register_device_class (vm, dev_class);
 

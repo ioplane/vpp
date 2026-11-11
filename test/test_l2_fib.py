@@ -607,6 +607,125 @@ class TestL2fib(VppTestCase):
             self.assertLess(len(e), ev_macs * 10)
         self.assertEqual(len(learned_macs ^ macs), 0)
 
+    def test_l2_fib_mac_learn_evs_flush(self):
+        """L2 FIB - mac learning events for MACs refreshed after a flush"""
+        bd1 = 1
+        hosts = self.create_hosts(10, subnet=41)
+        macs = {
+            h.bin_mac
+            for swif in self.bd_ifs(bd1)
+            for h in hosts[self.pg_interfaces[swif].sw_if_index]
+        }
+        action = VppEnum.vl_api_mac_event_action_t.MAC_EVENT_ACTION_API_ADD
+
+        def collect_learned(expected):
+            learned = set()
+            for _ in range(10):
+                self.virtual_sleep(1)
+                learned |= {
+                    e.mac[i].mac_addr.packed
+                    for e in self.vapi.collect_events()
+                    for i in range(e.n_macs)
+                    if e.mac[i].action == action
+                }
+                if expected <= learned:
+                    break
+            return learned
+
+        self.vapi.l2fib_set_scan_delay(scan_delay=10)
+        self.vapi.want_l2_macs_events2()
+        self.sleep(1)
+        self.learn_hosts(bd1, hosts)
+        self.assertEqual(macs - collect_learned(macs), set())
+
+        # A flush only obsoletes the entries' sequence number, and the scan
+        # that then deletes them takes a while: keep the hosts sending, so
+        # that most of them refresh their stale entry before the scan gets
+        # to it.
+        for swif in self.bd_ifs(bd1):
+            pg_if = self.pg_interfaces[swif]
+            pg_if.add_stream(
+                [
+                    Ether(dst="ff:ff:ff:ff:ff:ff", src=host.mac)
+                    for host in hosts[pg_if.sw_if_index]
+                ],
+                nb_replays=2000,
+            )
+            self.vapi.cli(
+                "packet-generator configure %s rate 2000" % pg_if.get_cap_name()
+            )
+        self.vapi.cli("packet-generator enable")
+        self.sleep(0.2)
+        self.vapi.l2fib_flush_bd(bd_id=bd1)
+        self.pg_start(trace=False)
+
+        # Every MAC the bridge domain knows after the flush was learned again
+        # after it, so it must have been reported as learned again.
+        fib_macs = macs & {
+            e.mac.packed
+            for e in self.vapi.l2_fib_table_dump(bd_id=bd1)
+            if not e.static_mac
+        }
+        learned_macs = collect_learned(fib_macs)
+        self.vapi.want_l2_macs_events2(enable_disable=0)
+        self.assertEqual(fib_macs, macs)
+        self.assertEqual(fib_macs - learned_macs, set())
+
+
+class TestL2fibFlushRefresh(VppTestCase):
+    """L2 FIB re-learn notification before a stale entry is scanned."""
+
+    def test_stale_hit_event(self):
+        """Refreshing a stale MAC reports an ADD without depending on a race."""
+        self.create_pg_interfaces(range(2))
+        self.vapi.bridge_domain_add_del_v2(
+            bd_id=1, learn=1, uu_flood=0, flood=1, forward=1
+        )
+        for interface in self.pg_interfaces:
+            interface.admin_up()
+            self.vapi.sw_interface_set_l2_bridge(
+                rx_sw_if_index=interface.sw_if_index, bd_id=1
+            )
+
+        mac = mac_pton(self.pg0.remote_mac)
+        packet = Ether(dst="ff:ff:ff:ff:ff:ff", src=self.pg0.remote_mac)
+        action = VppEnum.vl_api_mac_event_action_t.MAC_EVENT_ACTION_API_ADD
+        counter = "/err/l2-learn/L2 learn hit updates"
+
+        def expect_add():
+            event = self.vapi.wait_for_event(None, "l2_macs_event")
+            self.assertEqual(event.n_macs, 1)
+            entry = event.mac[0]
+            self.assertEqual(entry.mac_addr.packed, mac)
+            self.assertEqual(entry.action, action)
+            self.assertEqual(entry.sw_if_index, self.pg0.sw_if_index)
+
+        self.vapi.want_l2_macs_events2()
+        try:
+            self.pg0.add_stream([packet])
+            self.pg_start()
+            expect_add()
+
+            # The initial event is emitted after the first scan completes.
+            # Invalidate the sequence number without waking the ager, so the
+            # packet must take the stale-hit path rather than a fresh miss.
+            before = self.statistics.get_err_counter(counter)
+            self.vapi.cli("test l2fib invalidate %s" % self.pg0.name)
+            self.pg0.add_stream([packet])
+            self.pg_start()
+            self.assertEqual(self.statistics.get_err_counter(counter), before + 1)
+
+            entries = {
+                entry.mac.packed: entry
+                for entry in self.vapi.l2_fib_table_dump(bd_id=1)
+            }
+            self.assertIn(mac, entries)
+            self.assertFalse(entries[mac].static_mac)
+            self.assertEqual(entries[mac].sw_if_index, self.pg0.sw_if_index)
+            expect_add()
+        finally:
+            self.vapi.want_l2_macs_events2(enable_disable=0)
+
 
 if __name__ == "__main__":
     unittest.main(testRunner=VppTestRunner)

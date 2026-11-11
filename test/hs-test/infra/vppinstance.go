@@ -59,7 +59,9 @@ plugins {
 
   plugin unittest_plugin.so { enable }
   plugin quic_plugin.so { enable }
+  plugin quic_unittest_plugin.so { enable }
   plugin quic_quicly_plugin.so { enable }
+  plugin quic_quicly_unittest_plugin.so { enable }
   plugin af_packet_plugin.so { enable }
   plugin hs_apps_plugin.so { enable }
   plugin vperf_plugin.so { enable }
@@ -891,6 +893,8 @@ var defaultMemLeakReportNoiseFrames = []string{
 var defaultMemLeakReportNoiseFramePairs = [][2]string{
 	// per worker scratch vectors, grow to a high-water mark and are never freed
 	{"_vec_validate", "session_tx_fifo_read_and_snd_i"},
+	// per worker event pool free indices, same
+	{"_pool_put_index", "session_event_dispatch_io"},
 }
 
 // memTraceIsReportNoise reports whether a trace is expected noise and what matched.

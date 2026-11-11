@@ -255,6 +255,7 @@ session_alloc (clib_thread_index_t thread_index)
   s->thread_index = thread_index;
   s->al_index = APP_INVALID_INDEX;
   s->listener_handle = SESSION_INVALID_HANDLE;
+  s->flags = SESSION_F_TX_READY;
 
   return s;
 }
@@ -546,20 +547,17 @@ session_alloc_for_half_open (transport_connection_t *tc)
 }
 
 void
-session_fifo_tuning (session_t * s, svm_fifo_t * f,
-		     session_ft_action_t act, u32 len)
+session_fifo_tuning_custom (session_t *s, svm_fifo_t *f, session_ft_action_t act, u32 len)
 {
-  if (s->flags & SESSION_F_CUSTOM_FIFO_TUNING)
+  app_worker_t *app_wrk = app_worker_get (s->app_wrk_index);
+
+  app_worker_session_fifo_tuning (app_wrk, s, f, act, len);
+  if (CLIB_ASSERT_ENABLE)
     {
-      app_worker_t *app_wrk = app_worker_get (s->app_wrk_index);
-      app_worker_session_fifo_tuning (app_wrk, s, f, act, len);
-      if (CLIB_ASSERT_ENABLE)
-	{
-	  segment_manager_t *sm;
-	  sm = segment_manager_get (f->segment_manager);
-	  ASSERT (f->shr->size >= 4096);
-	  ASSERT (f->shr->size <= sm->max_fifo_size);
-	}
+      segment_manager_t *sm;
+      sm = segment_manager_get (f->segment_manager);
+      ASSERT (f->shr->size >= 4096);
+      ASSERT (f->shr->size <= sm->max_fifo_size);
     }
 }
 
@@ -1177,12 +1175,15 @@ session_transport_reset_notify (transport_connection_t * tc)
     return;
   if (s->session_state == SESSION_STATE_ACCEPTING)
     {
+      tc->flags |= TRANSPORT_CONNECTION_F_ERROR;
       session_set_state (s, SESSION_STATE_TRANSPORT_CLOSING);
       return;
     }
   session_set_state (s, SESSION_STATE_TRANSPORT_CLOSING);
-  app_wrk = app_worker_get (s->app_wrk_index);
-  app_worker_reset_notify (app_wrk, s);
+
+  app_wrk = app_worker_get_if_valid (s->app_wrk_index);
+  if (app_wrk)
+    app_worker_reset_notify (app_wrk, s);
 }
 
 int
@@ -1525,11 +1526,14 @@ session_stop_listen (session_t * s)
  * Note that half-closing will not change the state of the session.
  */
 void
-session_half_close (session_t *s)
+session_half_close (session_t *s, u8 is_rx)
 {
-  if (!s)
+  session_flags_t ready_flag = is_rx ? SESSION_F_RX_READY : SESSION_F_TX_READY;
+
+  if (!s || !(s->flags & ready_flag))
     return;
 
+  s->flags &= ~ready_flag;
   session_program_transport_ctrl_evt (s, SESSION_CTRL_EVT_HALF_CLOSE);
 }
 
@@ -1640,17 +1644,21 @@ session_detach_app (session_t *s)
  * Must be called from the session's thread.
  */
 void
-session_transport_half_close (session_t *s)
+session_transport_half_close (session_t *s, u8 is_rx)
 {
+  /* Full close changes the state before the queued RX half-close is dispatched. */
+  u8 pending_rx_close = is_rx && (s->session_state == SESSION_STATE_CLOSING ||
+				  s->session_state == SESSION_STATE_APP_CLOSED);
+
   /* A half-close may also be requested after the peer has already sent FIN.
    * In that case the session is transport-closing and the transport must be
    * allowed to send its FIN to complete the passive close. */
   if (s->session_state != SESSION_STATE_READY &&
-      s->session_state != SESSION_STATE_TRANSPORT_CLOSING)
+      s->session_state != SESSION_STATE_TRANSPORT_CLOSING && !pending_rx_close)
     return;
 
-  transport_half_close (session_get_transport_proto (s), s->connection_index,
-			s->thread_index);
+  transport_half_close (session_get_transport_proto (s), s->connection_index, s->thread_index,
+			is_rx);
 }
 
 /**

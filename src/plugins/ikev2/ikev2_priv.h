@@ -66,6 +66,7 @@ typedef enum
 {
   IKEV2_DH_GROUP_MODP = 0,
   IKEV2_DH_GROUP_ECP = 1,
+  IKEV2_DH_GROUP_CURVE = 2,
 } ikev2_dh_group_t;
 
 typedef struct
@@ -162,10 +163,6 @@ typedef struct
   u8 is_expired;
   i8 rekey_retries;
 
-  /* N(USE_TRANSPORT_MODE) received in IKE_AUTH: in the request on the
-     responder, in the response on the initiator */
-  u8 use_transport_mode;
-
   f64 timestamp;
 } ikev2_child_sa_t;
 
@@ -179,9 +176,6 @@ typedef struct
 {
   u16 notify_type;
   u8 kex;
-  /* N(USE_TRANSPORT_MODE) received in CREATE_CHILD_SA: in the request on the
-     responder, in the response on the initiator */
-  u8 use_transport_mode;
   u8 protocol_id;
   u32 spi;
   u32 ispi;
@@ -419,9 +413,6 @@ typedef struct
   /* pointer to find tunnel by ipip tunnel key function in ipip plugin */
   __typeof__ (ipip_tunnel_db_find_sw_if_index) *ipip_tunnel_db_find_sw_if_index_fn_ptr;
 
-  /* pointer to ipip interface check function in ipip plugin */
-  __typeof__ (ipip_sw_if_index_is_tunnel) *ipip_sw_if_index_is_tunnel_fn_ptr;
-
   /* flag indicating whether lazy init is done or not */
   int lazy_init_done;
 
@@ -437,7 +428,7 @@ typedef struct
 
 } ikev2_main_t;
 
-extern ikev2_main_t ikev2_main;
+extern __clib_export ikev2_main_t ikev2_main;
 
 void ikev2_sa_free_proposal_vector (ikev2_sa_proposal_t ** v);
 ikev2_sa_transform_t *ikev2_sa_get_td_for_type (ikev2_sa_proposal_t * p,
@@ -456,8 +447,8 @@ int ikev2_encrypt_aead_data (ikev2_sa_t *sa, ikev2_sa_transform_t *tr_encr, v8 *
 			     u8 *aad, u32 aad_len, u8 *tag);
 int ikev2_decrypt_aead_data (ikev2_sa_t *sa, ikev2_sa_transform_t *tr_encr, u8 *data, int data_len,
 			     u8 *aad, u32 aad_len, u8 *tag, u32 *out_len);
-void ikev2_generate_dh (ikev2_sa_t * sa, ikev2_sa_transform_t * t);
-void ikev2_complete_dh (ikev2_sa_t * sa, ikev2_sa_transform_t * t);
+int ikev2_generate_dh (ikev2_sa_t *sa, ikev2_sa_transform_t *t);
+int ikev2_complete_dh (ikev2_sa_t *sa, ikev2_sa_transform_t *t);
 int ikev2_verify_sign (EVP_PKEY * pkey, u8 * sigbuf, u8 * data);
 u8 *ikev2_calc_sign (EVP_PKEY * pkey, u8 * data);
 EVP_PKEY *ikev2_load_cert_file (u8 * file);

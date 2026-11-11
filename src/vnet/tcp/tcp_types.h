@@ -141,6 +141,7 @@ typedef enum tcp_connection_flag_
 
 #define TCP_SCOREBOARD_TRACE (0)
 #define TCP_MAX_SACK_BLOCKS	    255 /**< Max number of SACK blocks stored */
+#define TCP_MAX_DSACK_BLOCKS	    8	/**< Max number of dsack blocks pending */
 #define TCP_INVALID_SACK_HOLE_INDEX ((u32)~0)
 #define TCP_MAX_SACK_REORDER 300
 #define TCP_SEQ_HALF_SPACE	    (1ULL << 31) /**< Half the 32-bit TCP sequence space */
@@ -488,7 +489,7 @@ typedef struct _tcp_connection
   u32 psh_seq;		/**< Add psh header for seg that includes this */
   u32 next_node_index;	/**< Can be used to control next node in output */
   u32 next_node_opaque;	/**< Opaque to pass to next node */
-  u32 limited_transmit;	/**< snd_nxt when limited transmit starts */
+  u32 unused;		/**< Unused, keeps the layout */
   u32 sw_if_index;	/**< Interface for the connection */
 
   /* Delivery rate estimation */
@@ -502,6 +503,7 @@ typedef struct _tcp_connection
   tcp_errors_t errors;	/**< Soft connection errors */
 
   tcp_dsack_undo_t dsack_undo; /**< Retransmit budget for D-SACK undo */
+  sack_block_t *snd_dsacks;    /**< Duplicates to report, one per ack */
 
   u32 iss;		/**< initial sent sequence */
   u32 irs;		/**< initial remote sequence */

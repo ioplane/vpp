@@ -33,6 +33,10 @@ typedef struct
   http_url_scheme_t scheme;
   u8 *authority;
   u32 authority_len;
+  u8 *host;
+  u32 host_len;
+  u8 host_parsed;
+  u8 is_options;
   u8 *path;
   u32 path_len;
   u8 *headers;
@@ -60,6 +64,8 @@ typedef struct
   u8 *headers;
   u32 headers_len;
   u32 control_data_len;
+  u8 *alt_svc;
+  u32 alt_svc_len;
 } hpack_response_control_data_t;
 
 /**

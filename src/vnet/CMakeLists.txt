@@ -152,8 +152,6 @@ list(APPEND VNET_HEADERS
   ethernet/packet.h
   ethernet/types.def
   ethernet/sfp.h
-  ethernet/sfp_sff8472.h
-  ethernet/sfp_sff8636.h
   ethernet/p2p_ethernet.h
   ethernet/arp_packet.h
 )
@@ -1113,6 +1111,7 @@ list(APPEND VNET_HEADERS
   adj/adj.h
   adj/adj_types.h
   adj/adj_glean.h
+  adj/adj_delegate.h
   adj/adj_nsh.h
   adj/adj_nbr.h
   adj/adj_midchain.h

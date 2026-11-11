@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,9 @@ import (
 	. "fd.io/hs-test/infra"
 	"github.com/edwarnicke/exechelper"
 	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 func init() {
@@ -27,7 +32,8 @@ func init() {
 		VppConnectProxyGetTest, VppConnectProxyPutTest, VppHttpsConnectProxyGetTest, VppH2ConnectProxyGetTest,
 		VppH2ConnectProxyPutTest, VppConnectProxyStressTest)
 	RegisterVppProxyMWTests(VppProxyHttpGetTcpMWTest, VppProxyHttpGetTcpStartupConfigMWTest, VppProxyHttpPutTcpMWTest, VppProxyTcpIperfMWTest,
-		VppProxyUdpIperfMWTest, VppConnectProxyStressMWTest, VppConnectProxyConnectionFailedMWTest)
+		VppProxyUdpIperfMWTest, VppConnectProxyStressMWTest, VppConnectProxyConnectionFailedMWTest,
+		VppConnectProxyHttp3StopSendingAfterFinMWTest)
 	RegisterVppUdpProxyTests(VppProxyUdpTest, VppConnectUdpProxyTest, VppConnectUdpInvalidCapsuleTest,
 		VppConnectUdpUnknownCapsuleTest, VppConnectUdpClientCloseTest, VppConnectUdpInvalidTargetTest, VppConnectUdpServerCloseTest,
 		VppConnectUdpStressTest)
@@ -47,7 +53,8 @@ func init() {
 		VppConnectProxyHttp3FinDrainTcpMWTest)
 	RegisterMasqueMWControlTests(VppConnectProxyDraft03MWTest, VppConnectProxyClientStressMWTest,
 		VppConnectProxyHttp3Draft03MWTest, VppConnectProxyHttp3TargetUnreachableMWTest,
-		VppConnectProxyHttp3StressMWTest, VppConnectProxyHttp2FinDrainTcpMWTest)
+		VppConnectProxyHttp3StressMWTest, VppConnectProxyHttp2FinDrainTcpMWTest,
+		VppConnectProxyClientConnectTimeoutMWTest)
 }
 
 func VppProxyHttpGetTcpMWTest(s *VppProxySuite) {
@@ -736,6 +743,9 @@ func vppConnectProxyClientCheckCleanup(s *MasqueSuite) {
 		}
 		time.Sleep(1 * time.Second)
 	}
+	if !closed {
+		s.SkipIfWrongWorkerThread("connect proxy session not closed")
+	}
 	AssertEqual(closed, true, "connect proxy session not closed")
 	h2Stats := clientVpp.Vppctl("show http stats")
 	streamsOpened := 0
@@ -752,14 +762,23 @@ func vppConnectProxyClientCheckCleanup(s *MasqueSuite) {
 		}
 	}
 	// one stream for http/2 connection (parent stays open)
+	if streamsOpened-streamsClosed != 1 {
+		s.SkipIfWrongWorkerThread("only parent stream should stay open")
+	}
 	AssertEqual(streamsOpened-streamsClosed, 1, "only parent stream should stays open")
 }
 
 func vppConnectProxyServerCheckCleanup(s *MasqueSuite, IsHttp3 bool) {
 	o := s.Containers.VppServer.VppInstance.Vppctl("show session verbose")
 	if IsHttp3 {
+		if strings.Count(o, "[H3]") != 2 {
+			s.SkipIfWrongWorkerThread("unexpected HTTP/3 sessions after cleanup")
+		}
 		AssertEqual(2, strings.Count(o, "[H3]"), "there should be http/3 connection session and parent stream")
 	} else {
+		if strings.Count(o, "[H2]") != 1 {
+			s.SkipIfWrongWorkerThread("unexpected HTTP/2 sessions after cleanup")
+		}
 		AssertEqual(1, strings.Count(o, "[H2]"), "there should be http/2 connection session")
 	}
 	h2Stats := s.Containers.VppServer.VppInstance.Vppctl("show http stats")
@@ -777,8 +796,14 @@ func vppConnectProxyServerCheckCleanup(s *MasqueSuite, IsHttp3 bool) {
 		}
 	}
 	if IsHttp3 {
+		if streamsOpened-streamsClosed != 1 {
+			s.SkipIfWrongWorkerThread("all tunnel streams should be closed")
+		}
 		AssertEqual(streamsOpened-streamsClosed, 1, "all tunnel streams should be closed")
 	} else {
+		if streamsOpened-streamsClosed != 0 {
+			s.SkipIfWrongWorkerThread("all tunnel streams should be closed")
+		}
 		AssertEqual(streamsOpened-streamsClosed, 0, "all tunnel streams should be closed")
 	}
 }
@@ -986,6 +1011,9 @@ func VppConnectProxyIperfUdpMWTest(s *MasqueSuite) {
 		}
 		time.Sleep(1 * time.Second)
 	}
+	if !closed {
+		s.SkipIfWrongWorkerThread("connect proxy TCP sessions not closed")
+	}
 	AssertEqual(closed, true)
 }
 
@@ -1041,6 +1069,65 @@ func VppConnectProxyClientUdpIdleMWTest(s *MasqueSuite) {
 	}()
 	AssertNil(<-finished)
 
+	vppConnectProxyClientCheckCleanup(s)
+	vppConnectProxyServerCheckCleanup(s, false)
+}
+
+func VppConnectProxyClientConnectTimeoutMWTest(s *MasqueSuite) {
+	s.CpusPerVppContainer = 3
+	s.SetupTest()
+	s.ExpectedConnectTimeouts = 1
+	s.StartNginxServer()
+	s.ProxyClientConnect("tcp", s.Ports.Nginx, "connect-timeout 5")
+	clientVpp := s.Containers.VppClient.VppInstance
+	serverVpp := s.Containers.VppServer.VppInstance
+	parentConnection := clientVpp.Vppctl("show http connect proxy client")
+
+	// Suppress CONNECT replies
+	AssertContains(serverVpp.Vppctl("set nsim poll-main-thread delay 0.01 ms bandwidth 1 gbit packet-size 1400 drop-fraction 1"),
+		"drop fraction 1.000000")
+	nsim := "nsim output-feature enable-disable " + s.Interfaces.TunnelServer.VppName()
+	AssertEmpty(serverVpp.Vppctl(nsim))
+
+	uri := fmt.Sprintf("http://%s:%s/64B", s.NginxAddr(), s.Ports.Nginx)
+	cmd := CommandInNetns([]string{"curl", "--noproxy", "*", "--max-time", "1", "--silent", "--show-error", uri}, s.NetNamespaces.Client)
+	output, err := cmd.CombinedOutput()
+	Log(string(output))
+	AssertNotNil(err)
+	AssertEqual(cmd.ProcessState.ExitCode(), 28, "curl should time out waiting for the response")
+	Eventually(func() string {
+		return serverVpp.Vppctl("show http stats")
+	}, 2*time.Second, time.Second).Should(ContainSubstring("1 responses sent"))
+	Eventually(s.ConnectTimeouts, 8*time.Second, time.Second).Should(Equal(1))
+
+	vppConnectProxyClientCheckCleanup(s)
+
+	// Release the late response after the client has reset the timed-out stream.
+	AssertEmpty(serverVpp.Vppctl(nsim + " disable"))
+	// Allow for the parent TCP retransmission timer's backoff under packet loss.
+	Eventually(func() bool {
+		return strings.Contains(clientVpp.Vppctl("show http stats"), "connections protocol error") ||
+			strings.Contains(serverVpp.Vppctl("show http stats"), "1 streams reset by peer")
+	}, 15*time.Second, time.Second).Should(BeTrue(), "late response or stream reset was not processed")
+	AssertNotContains(clientVpp.Vppctl("show http stats"), "connections protocol error")
+	vppConnectProxyServerCheckCleanup(s, false)
+
+	// Verify that another tunnel works on the original parent connection.
+	cmd = CommandInNetns([]string{"curl", "--noproxy", "*", "--max-time", "15", "--fail", "--silent", "--show-error", uri}, s.NetNamespaces.Client)
+	output, err = cmd.CombinedOutput()
+	Log(string(output))
+	if err != nil {
+		s.SkipIfWrongWorkerThread("tunnel request on original parent connection failed")
+	}
+	AssertNil(err)
+	AssertEqual(strings.Repeat("x", 64), string(output))
+	AssertEqual(parentConnection, clientVpp.Vppctl("show http connect proxy client"), "parent connection changed")
+	clientStats := clientVpp.Vppctl("show http stats")
+	serverStats := serverVpp.Vppctl("show http stats")
+	AssertContains(clientStats, "1 connections established")
+	AssertContains(serverStats, "1 connections accepted")
+	AssertNotContains(clientStats, "connections protocol error")
+	AssertNotContains(serverStats, "connections protocol error")
 	vppConnectProxyClientCheckCleanup(s)
 	vppConnectProxyServerCheckCleanup(s, false)
 }
@@ -1164,6 +1251,9 @@ func vppConnectProxyClientHttp3CheckCleanup(s *MasqueSuite) {
 			break
 		}
 		time.Sleep(1 * time.Second)
+	}
+	if !closed {
+		s.SkipIfWrongWorkerThread("connect proxy session not closed")
 	}
 	AssertEqual(closed, true, "connect proxy session not closed")
 }
@@ -1673,4 +1763,93 @@ func VppConnectProxyHttp3FinDrainTcpMWTest(s *MasqueSuite) {
 	s.CpusPerVppContainer = 3
 	s.SetupTest("http3")
 	vppConnectProxyFinDrainTcp(s, true)
+}
+
+func VppConnectProxyHttp3StopSendingAfterFinMWTest(s *VppProxySuite) {
+	s.CpusPerVppContainer = 3
+	var tcpConfig Stanza
+	tcpConfig.NewStanza("tcp").Append("closewait-time 60").Close()
+	s.SetupTest(tcpConfig)
+	vpp := s.Containers.VppProxy.VppInstance
+	const timeout = 10 * time.Second
+
+	proxyAddress := net.JoinHostPort(s.VppProxyAddr(), fmt.Sprint(s.Ports.Proxy))
+	targetAddress := net.JoinHostPort(s.ServerAddr(), fmt.Sprint(s.Ports.Server))
+	Log(vpp.Vppctl("test proxy server fifo-size 64k max-fifo-size 64k server-uri https://" + proxyAddress + " http3"))
+
+	payload := bytes.Repeat([]byte("stop-sending-after-fin"), 2048)
+	serverDone, serverReady := runFinDrainTcpServer(targetAddress, timeout, func(conn *net.TCPConn) error {
+		if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			return err
+		}
+		if _, err := io.Copy(conn, bytes.NewReader(payload)); err != nil {
+			return err
+		}
+		return conn.CloseWrite()
+	})
+	<-serverReady
+	select {
+	case err := <-serverDone:
+		AssertNil(err, "TCP target setup failed")
+	default:
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	conn, err := quic.DialAddr(ctx, proxyAddress,
+		&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}},
+		&quic.Config{
+			InitialStreamReceiveWindow: 4096,
+			MaxStreamReceiveWindow:     4096,
+			KeepAlivePeriod:            time.Second,
+		})
+	AssertNil(err)
+	defer conn.CloseWithError(0, "")
+
+	client := (&http3.Transport{}).NewClientConn(conn)
+	stream, err := client.OpenRequestStream(ctx)
+	AssertNil(err)
+	AssertNil(stream.SetDeadline(time.Now().Add(timeout)))
+	req, err := http.NewRequest(http.MethodConnect, "https://"+targetAddress, nil)
+	AssertNil(err)
+	AssertNil(stream.SendRequestHeader(req))
+	resp, err := stream.ReadResponse()
+	AssertNil(err)
+	AssertHttpStatus(resp, http.StatusOK)
+
+	streamID := fmt.Sprintf(" stream-id 0x%x conn ", stream.StreamID())
+	streamState := func() string {
+		for _, section := range strings.Split(vpp.Vppctl("show session verbose 2"), "\n[") {
+			if strings.Contains(section, "[Q] stream ") && strings.Contains(section, streamID) {
+				return section
+			}
+		}
+		return ""
+	}
+	Eventually(streamState, timeout, 100*time.Millisecond).Should(And(
+		Or(ContainSubstring("app-tx-closed"), ContainSubstring("snd-side-closed")),
+		MatchRegexp(`app_tx_data_len [1-9]\d*`),
+	), "quic must receive half-close from app while data is pending")
+	Log(streamState())
+
+	select {
+	case err := <-serverDone:
+		AssertNil(err, "TCP target failed to send data and FIN")
+	case <-time.After(timeout):
+		AssertFail("TCP target did not finish sending data and FIN")
+	}
+
+	stream.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+	Eventually(streamState, timeout, 100*time.Millisecond).Should(Or(
+		BeEmpty(),
+		MatchRegexp(`(?m) pending-ranges\r?$`),
+	), "STOP_SENDING must reset send side after app half-close")
+	AssertNil(stream.Close())
+
+	Eventually(streamState, timeout, 100*time.Millisecond).Should(BeEmpty(),
+		"STOP_SENDING after FIN must delete quic stream")
+	Eventually(func() int {
+		return strings.Count(vpp.Vppctl("show session verbose"), "[H3]")
+	}, timeout, 100*time.Millisecond).Should(Equal(1), "only h3 connection should remain")
+	AssertNil(context.Cause(conn.Context()), "h3 connection must stay open during stream cleanup")
 }
