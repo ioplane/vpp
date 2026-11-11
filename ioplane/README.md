@@ -19,5 +19,5 @@ pushed there.
 | [standards/naming.md](standards/naming.md) | Names of branches, documents, tests and changes |
 | [standards/rules.md](standards/rules.md) | Rules for contributing through the fork |
 
-Owner: Pavel Lavrukhin. Last reviewed: 2026-11-11, against upstream
+Owner: Pavel Lavrukhin. Last reviewed: 2026-11-12, against upstream
 `242ab5bfe` (`v27.02-rc0-422`).

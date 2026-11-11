@@ -4,7 +4,8 @@ Planned upstream contributions of the `ioplane/vpp` fork. An item enters this
 list only with a reference: an IETF RFC section, an upstream file, or a
 measurement. Order is by benefit to other VPP users, then by review cost.
 
-Baseline: upstream `242ab5bfe` (`v27.02-rc0-422`), 2026-11-11. Maturity values
+Baseline: upstream `242ab5bfe` (`v27.02-rc0-422`), 2026-11-11. Last update:
+2026-11-12. Maturity values
 are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 
 ## Status legend
@@ -30,6 +31,7 @@ are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 | Signature authentication incl. ECDSA | RFC 7427 | planned |
 | Post-quantum preshared keys | RFC 8784 | planned |
 | Intermediate exchange, multiple key exchanges | RFC 9242, RFC 9370 | proposal |
+| Factor duplicated SA dump copies in the API | — | in review, 47682 |
 | Section-to-test conformance table, then state → production | RFC 7296 | planned, after the stack merges |
 | IKEv1 | RFC 2409 (Historic) | rejected, [ADR-0002](adr/0002-no-ikev1.md) |
 | MOBIKE, EAP, configuration payload | RFC 4555, RFC 7296 §2.16, §2.19 | not planned without a remote-access user |
@@ -40,7 +42,7 @@ are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 |---|---|---|
 | Release netlink socket and link on every path | libnl `nl_socket_free` | in review, 47520 |
 | Reject malformed routes atomically | — | merged, 47337 |
-| Native nexthop objects (`RTM_NEWNEXTHOP`, route `nh-id`) | kernel `rt-nexthop` netlink spec | planned |
+| Native nexthop objects (`RTM_NEWNEXTHOP`, route `nh-id`) | kernel `rt-nexthop` netlink spec | proposal, [RFC-0002](rfc/0002-linux-cp-nexthop-objects.md) |
 | Document the dependency on `nexthop_compat_mode` | kernel `ip-sysctl` | planned |
 | Policy routing rules (`RTM_NEWRULE`) | kernel rtnetlink | proposal |
 | VRF devices | kernel rtnetlink link kinds | proposal |
@@ -70,7 +72,28 @@ are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 | cnat session affinity and connection draining | Kubernetes `sessionAffinity: ClientIP` | proposal |
 | Flow export of verdict and NAT translation | RFC 7011 | proposal |
 
-## 6. Not planned
+## 6. Milestones
+
+Work is taken in this order. A milestone starts when the previous one has
+met its exit condition or is blocked on review.
+
+| Milestone | Content | Exit condition |
+|---|---|---|
+| M1 | Land the open changes: answer reviews, keep CI green | every open change merged or abandoned with a reason |
+| M2 | linux-cp nexthop objects, [RFC-0002](rfc/0002-linux-cp-nexthop-objects.md) step 1 | tests show the behaviour with `nexthop_compat_mode` 1 and 0; result posted to the maintainers |
+| M3 | linux-cp nexthop objects, step 2 | change on Gerrit with the test plan of RFC-0002 passing |
+| M4 | IKEv2 fragmentation, [RFC-0001](rfc/0001-ikev2-fragmentation.md) | proposal agreed with the plugin maintainers; change on Gerrit with interoperability evidence |
+| M5 | Fuzz targets for IKEv2 payloads, DHCP options, linux-cp netlink | targets build in the toolchain container and run for a fixed time without findings, or the findings are fixed |
+| M6 | IKEv2 cookies, then signature authentication | changes on Gerrit, each with negative tests |
+
+M1 depends on reviewers and runs in parallel with the others. M2 is first
+among the new work because it is a measurement: it changes no plugin code and
+its result decides the size of M3.
+
+All work follows [ADR-0005](adr/0005-verification-before-push.md): built and
+tested in the toolchain container before push.
+
+## 7. Not planned
 
 Recorded so that the question is not reopened without new facts.
 

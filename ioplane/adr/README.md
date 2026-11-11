@@ -16,3 +16,4 @@ accepted or rejected for a reason that will be asked about again.
 | [0002](0002-no-ikev1.md) | IKEv1 is not implemented | accepted |
 | [0003](0003-control-plane-stays-external.md) | The control plane stays outside VPP | accepted |
 | [0004](0004-native-drivers-and-dpdk.md) | Native drivers and DPDK | accepted |
+| [0005](0005-verification-before-push.md) | Verification environment and gate before push | accepted |

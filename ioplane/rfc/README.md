@@ -25,3 +25,4 @@ API, or a change of behaviour. A bug fix needs no proposal.
 | RFC | Title | Status |
 |---|---|---|
 | [0001](0001-ikev2-fragmentation.md) | IKEv2 message fragmentation | draft |
+| [0002](0002-linux-cp-nexthop-objects.md) | Nexthop objects in linux-cp | draft |
