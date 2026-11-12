@@ -29,6 +29,7 @@ are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 | Message fragmentation | RFC 7383 | proposal, [RFC-0001](rfc/0001-ikev2-fragmentation.md) |
 | Cookie exchange under load | RFC 7296 §2.6 | planned |
 | Fail authentication when signing fails | RFC 7296 §2.15 | in review, 47688 |
+| Do not announce signature hash algorithms without method 14 | RFC 7427 §3, §4 | in review, 47691 |
 | Signature authentication with SHA-2, RSA-PSS and ECDSA | RFC 7427, RFC 8247 §3.2 | proposal, [RFC-0003](rfc/0003-ikev2-signature-authentication.md); next, [ADR-0006](adr/0006-signature-authentication-first.md) |
 | Post-quantum preshared keys | RFC 8784 | planned |
 | Intermediate exchange, multiple key exchanges | RFC 9242, RFC 9370 | proposal |

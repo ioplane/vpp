@@ -1,6 +1,6 @@
 # RFC-0003: IKEv2 signature authentication
 
-Status: draft. Date: 2026-11-12. Roadmap: section 1.
+Status: draft. Date: 2026-11-12. Roadmap: section 1. Step 1 is done.
 Decision record: [ADR-0006](../adr/0006-signature-authentication-first.md).
 
 ## Summary
@@ -58,6 +58,31 @@ the notify from VPP, and whether the exchange completes. The result is
 posted with the proposal. If the peer answers with method 14 and the
 exchange fails, the announcement is a present defect and step 2 is sent
 first as its own fix.
+
+Result, 2026-11-12. Peer: strongSwan 6.1.0, RSA-2048 certificates, both
+daemons in one network namespace over a veth pair, SHA-1 signatures allowed
+by the crypto policy so that method 1 can work at all.
+
+| VPP | Initiator | Notify sent by VPP | Method used by the peer | Outcome |
+|---|---|---|---|---|
+| `1b2924c8e` | peer | no | 1 | established |
+| `1b2924c8e` | VPP | yes: 1, 2, 3, 4 | 14, `sha256WithRSAEncryption` | VPP: `AUTH_FAILED`, "no matching profile found"; the peer reports the IKE SA as established |
+| with 47691 | VPP | no | 1 | established |
+| with 47691 | peer | no | 1 | established |
+
+The Authentication Data of the peer under method 14 starts with
+`0F 30 0D 06 09 2A 86 48 86 F7 0D 01 01 0B 05 00`: length 15 and the
+`AlgorithmIdentifier` of RFC 7427 A.1.2. Three consequences:
+
+- The announcement is a present defect: VPP as initiator with certificate
+  authentication cannot connect to this peer. Change 47691 removes the
+  notify; it is the small fix this step called for and does not replace
+  steps 2 to 4.
+- The peer signs RSASSA-PKCS1-v1_5 with SHA-256 by default, not RSASSA-PSS.
+  Step 3 must accept that encoding to interoperate, which the table of
+  accepted identifiers already does.
+- The peer accepts method 1 from VPP even after both notifies were
+  exchanged, and it ignores hash identifier 1 in the list from VPP.
 
 ### Step 2: make the announcement truthful
 
