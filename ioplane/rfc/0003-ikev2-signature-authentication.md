@@ -1,6 +1,7 @@
 # RFC-0003: IKEv2 signature authentication
 
-Status: draft. Date: 2026-11-12. Roadmap: section 1. Step 1 is done.
+Status: draft. Date: 2026-11-12. Roadmap: section 1. Step 1 is done; steps 2 and
+3 are implemented for RSA keys and not yet on Gerrit.
 Decision record: [ADR-0006](../adr/0006-signature-authentication-first.md).
 
 ## Summary
@@ -108,18 +109,36 @@ when both ends sent the notify, method 1 otherwise.
 
 | Profile | Both ends sent the notify | Notify missing on either side |
 |---|---|---|
-| `rsa-sig` | sends and accepts method 14 only | sends and accepts method 1, as today |
+| `rsa-sig`, initiator | sends method 14; accepts method 14 or 1 | sends and accepts method 1, as today |
+| `rsa-sig`, responder | accepts method 14 or 1; answers with the method the initiator used | sends and accepts method 1, as today |
 | `digital-signature` (new) | sends and accepts method 14 only | authentication fails |
+
+Two rules deviate from the "MUST be used" of RFC 7427 §3, on purpose:
+
+- An `rsa-sig` profile accepts method 1 after the notify exchange. Releases
+  of this plugin before 47691 announce the hashes and sign with method 1; a
+  strict responder would lock them out.
+- A responder answers with the method the initiator used. An initiator that
+  signed with method 14 has shown that it implements it; one that announced
+  the hashes and signed with method 1 would not understand a method 14
+  answer.
+
+Neither rule weakens anything against the code before this change: the
+method is carried inside the protected IKE_AUTH exchange, and the previous
+code accepted method 1 only. An `rsa-sig` profile does not gain protection
+against attacks on SHA-1; `digital-signature` does.
+
+An initiator verifies the responder against the profile it started the
+exchange with, so a second profile cannot relax a `digital-signature` one.
 
 - `digital-signature` (14) is one new value in the API enumeration and the
   CLI. It is the strict form for sites that must not use SHA-1, and it is
   the value the SA dump reports when method 14 was used.
-- Signing: the hash is the
-  strongest one from the peer's list that the plugin supports, in the order
-  SHA2-512, SHA2-384, SHA2-256. With an RSA key the scheme is RSASSA-PSS
-  with that hash and a salt of the hash length; with an ECDSA key it is
-  `ecdsa-with-sha*`. The Authentication Data is the one-octet length, the
-  DER `AlgorithmIdentifier` and the signature (RFC 7427 §3).
+- Signing with an RSA key: RSASSA-PSS with SHA-256 and a salt of 32 octets
+  whenever the peer lists SHA2-256, which RFC 8247 §3.2 requires; otherwise
+  RSASSA-PKCS1-v1_5 with the strongest hash the peer listed. ECDSA keys are
+  a later step. The Authentication Data is the one-octet length, the DER
+  `AlgorithmIdentifier` and the signature (RFC 7427 §3).
 - Verifying: the `AlgorithmIdentifier` is compared as an octet string with
   a fixed table. From RFC 7427 Appendix A: RSASSA-PSS with SHA-256 (A.4.3),
   `sha256WithRSAEncryption`, `sha384WithRSAEncryption`,
@@ -130,7 +149,10 @@ when both ends sent the notify, method 1 otherwise.
   octets a second implementation actually sends are recorded in the
   interoperability run before the table is fixed. Everything else,
   including every SHA-1 identifier and RSASSA-PSS with empty or default
-  parameters, is rejected. No ASN.1 parser is added.
+  parameters, is rejected. No ASN.1 parser is added. The RSASSA-PSS
+  identifier is also accepted in the 67-octet form a DER encoder writes,
+  without the default trailerField; it is sent in the 72-octet form of the
+  RFC.
 - The algorithm must match the key type of the configured certificate, and
   an EC key is no longer signed under method 1.
 - Signatures are computed with `EVP_DigestSign*` and `EVP_DigestVerify*`;
@@ -148,7 +170,7 @@ method 1 is unchanged.
 | Condition | Result |
 |---|---|
 | Profile `digital-signature`, peer sent no notify | initiator: the SA is dropped before IKE_AUTH and an error is logged; responder: `AUTHENTICATION_FAILED` |
-| Both ends sent the notify, peer's AUTH uses method 1 | `AUTHENTICATION_FAILED` |
+| Both ends sent the notify, peer's AUTH uses method 1 | accepted for an `rsa-sig` profile, `AUTHENTICATION_FAILED` for `digital-signature` |
 | Profile `rsa-sig`, no notify exchanged, local key is not RSA | as "signing fails" below |
 | No common hash with the peer's list | same as above |
 | Received method 14, Authentication Data shorter than the length octet says | malformed message, exchange fails |
@@ -204,3 +226,14 @@ The test peer in `test/test_ikev2.py` gains method 14 for RSA-PSS and ECDSA.
 - EdDSA (RFC 8420) and the fixed-curve ECDSA methods 9, 10 and 11, which
   RFC 8247 §3.1 expects to be replaced by method 14.
 - Removing method 1.
+
+## Implementation status, 2026-11-12
+
+Steps 2 and 3 exist for RSA keys on a branch based on 47688, 47691 and 47698.
+`test_ikev2` passes 68 of 68, including cases for each row of the failure
+table. Against strongSwan 6.1.0 the exchange completes in both roles under a
+crypto policy that forbids SHA-1 signatures: the peer verifies
+`RSA_EMSA_PSS_SHA2_256_SALT_32` from VPP, and VPP verifies the peer's
+`sha256WithRSAEncryption`. Not done: ECDSA keys, RSASSA-PSS with SHA-384 and
+SHA-512, step 4.
+
