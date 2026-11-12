@@ -26,3 +26,4 @@ API, or a change of behaviour. A bug fix needs no proposal.
 |---|---|---|
 | [0001](0001-ikev2-fragmentation.md) | IKEv2 message fragmentation | draft |
 | [0002](0002-linux-cp-nexthop-objects.md) | Nexthop objects in linux-cp | draft |
+| [0003](0003-ikev2-signature-authentication.md) | IKEv2 signature authentication | draft |

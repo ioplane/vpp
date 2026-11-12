@@ -28,7 +28,8 @@ are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 | USE_TRANSPORT_MODE negotiation | RFC 7296 §1.3.1 | in review, 47112 |
 | Message fragmentation | RFC 7383 | proposal, [RFC-0001](rfc/0001-ikev2-fragmentation.md) |
 | Cookie exchange under load | RFC 7296 §2.6 | planned |
-| Signature authentication incl. ECDSA | RFC 7427 | planned |
+| Fail authentication when signing fails | RFC 7296 §2.15 | in review, 47688 |
+| Signature authentication with SHA-2, RSA-PSS and ECDSA | RFC 7427, RFC 8247 §3.2 | proposal, [RFC-0003](rfc/0003-ikev2-signature-authentication.md); next, [ADR-0006](adr/0006-signature-authentication-first.md) |
 | Post-quantum preshared keys | RFC 8784 | planned |
 | Intermediate exchange, multiple key exchanges | RFC 9242, RFC 9370 | proposal |
 | Factor duplicated SA dump copies in the API | — | in review, 47682 |
@@ -82,13 +83,16 @@ met its exit condition or is blocked on review.
 | M1 | Land the open changes: answer reviews, keep CI green | every open change merged or abandoned with a reason |
 | M2 | linux-cp nexthop objects, [RFC-0002](rfc/0002-linux-cp-nexthop-objects.md) step 1 | tests show the behaviour with `nexthop_compat_mode` 1 and 0; result posted to the maintainers |
 | M3 | linux-cp nexthop objects, step 2 | change on Gerrit with the test plan of RFC-0002 passing |
-| M4 | IKEv2 fragmentation, [RFC-0001](rfc/0001-ikev2-fragmentation.md) | proposal agreed with the plugin maintainers; change on Gerrit with interoperability evidence |
-| M5 | Fuzz targets for IKEv2 payloads, DHCP options, linux-cp netlink | targets build in the toolchain container and run for a fixed time without findings, or the findings are fixed |
-| M6 | IKEv2 cookies, then signature authentication | changes on Gerrit, each with negative tests |
+| M4 | IKEv2 signature authentication, [RFC-0003](rfc/0003-ikev2-signature-authentication.md) | step 1 interoperability result posted; proposal sent to the plugin maintainers; changes on Gerrit with the test plan passing under a crypto policy that forbids SHA-1 |
+| M5 | IKEv2 fragmentation, [RFC-0001](rfc/0001-ikev2-fragmentation.md) | proposal agreed with the plugin maintainers; change on Gerrit with interoperability evidence |
+| M6 | Fuzz targets for IKEv2 payloads, DHCP options, linux-cp netlink | targets build in the toolchain container and run for a fixed time without findings, or the findings are fixed |
+| M7 | IKEv2 cookies | change on Gerrit with negative tests |
 
 M1 depends on reviewers and runs in parallel with the others. M2 is first
 among the new work because it is a measurement: it changes no plugin code and
-its result decides the size of M3.
+its result decides the size of M3. M4 was moved ahead of fragmentation and
+cookies by [ADR-0006](adr/0006-signature-authentication-first.md); its first
+step is also a measurement and runs in parallel with M2.
 
 All work follows [ADR-0005](adr/0005-verification-before-push.md): built and
 tested in the toolchain container before push.
