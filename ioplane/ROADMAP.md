@@ -30,7 +30,9 @@ are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 | Cookie exchange under load | RFC 7296 §2.6 | planned |
 | Fail authentication when signing fails | RFC 7296 §2.15 | in review, 47688 |
 | Do not announce signature hash algorithms without method 14 | RFC 7427 §3, §4 | in review, 47691 |
-| Signature authentication with SHA-2, RSA-PSS and ECDSA | RFC 7427, RFC 8247 §3.2 | proposal, [RFC-0003](rfc/0003-ikev2-signature-authentication.md); next, [ADR-0006](adr/0006-signature-authentication-first.md) |
+| Compare the whole shared-key AUTH value | RFC 7296 §2.15 | in review, 47698 |
+| Signature authentication with SHA-2: RSA-PSS and PKCS #1 v1.5 | RFC 7427, RFC 8247 §3.2 | implemented for RSA keys, not on Gerrit yet; [RFC-0003](rfc/0003-ikev2-signature-authentication.md) sent to vpp-dev 2026-11-12; waits for 47688, 47691, 47698 |
+| Signature authentication with ECDSA keys, RSA-PSS with SHA-384 and SHA-512 | RFC 7427 | planned, after the RSA change |
 | Post-quantum preshared keys | RFC 8784 | planned |
 | Intermediate exchange, multiple key exchanges | RFC 9242, RFC 9370 | proposal |
 | Factor duplicated SA dump copies in the API | — | in review, 47682 |
@@ -55,13 +57,17 @@ are the `state` field of the plugin's `FEATURE.yaml` at that commit.
 
 | Item | Reference | Status |
 |---|---|---|
-| `worker thread deadlock` panics under parallel CI load | `test/asf/asfframework.py` sets `barrier-timeout 5` | planned: collect data, propose a measured change |
+| `worker thread deadlock` panics under parallel CI load | `test/asf/asfframework.py` sets `barrier-timeout 5` | data posted to vpp-dev 2026-11-12: six changes red in one batch, all green one at a time |
+| `test_nat64` `test_reass_hairpinning` asserts that two random ports differ | `test/test_nat64.py` | planned: fix the test |
 | Fuzz targets for IKEv2 payloads, DHCP options, linux-cp netlink | defects fixed in 47638, 47514, 47337 | planned |
 
 ## 4. Robustness of error paths
 
 | Item | Reference | Status |
 |---|---|---|
+| `strncmp_s` checks `s2` before comparing | — | in review, 47695 |
+| Defined shifts in x86 `u8x16_load_partial`; the NEON variant is open | GCC vector extension, SSE2 `psrl*` | in review, 47697 |
+| IKEv2 AUTH payload shorter than its header; notify data not freed; nonce compared over the peer's length | RFC 7296 §3.8, §3.10 | planned: confirm with tests, then fix |
 | DHCP client option parsing bounded to the packet | RFC 2132 | in review, 47514 |
 | Session layer rollback on attach, mq and detach failures | — | 47509 merged; 47516–47518, 47521 in review |
 | ACL collision-list rescans bounded | — | in review, 47511 |
@@ -81,10 +87,10 @@ met its exit condition or is blocked on review.
 
 | Milestone | Content | Exit condition |
 |---|---|---|
-| M1 | Land the open changes: answer reviews, keep CI green | every open change merged or abandoned with a reason |
+| M1 | Land the open changes: answer reviews, keep CI green | every open change merged or abandoned with a reason. 2026-11-12: 50 open, all Verified+1, review request sent to vpp-dev |
 | M2 | linux-cp nexthop objects, [RFC-0002](rfc/0002-linux-cp-nexthop-objects.md) step 1 | tests show the behaviour with `nexthop_compat_mode` 1 and 0; result posted to the maintainers |
 | M3 | linux-cp nexthop objects, step 2 | change on Gerrit with the test plan of RFC-0002 passing |
-| M4 | IKEv2 signature authentication, [RFC-0003](rfc/0003-ikev2-signature-authentication.md) | step 1 interoperability result posted; proposal sent to the plugin maintainers; changes on Gerrit with the test plan passing under a crypto policy that forbids SHA-1 |
+| M4 | IKEv2 signature authentication, [RFC-0003](rfc/0003-ikev2-signature-authentication.md) | step 1 done; proposal sent to vpp-dev 2026-11-12; RSA implementation passes its tests and interoperates under a policy that forbids SHA-1. Exit: the two deviations from RFC 7427 §3 accepted or rejected by the maintainers; change on Gerrit after 47688, 47691 and 47698 merge |
 | M5 | IKEv2 fragmentation, [RFC-0001](rfc/0001-ikev2-fragmentation.md) | proposal agreed with the plugin maintainers; change on Gerrit with interoperability evidence |
 | M6 | Fuzz targets for IKEv2 payloads, DHCP options, linux-cp netlink | targets build in the toolchain container and run for a fixed time without findings, or the findings are fixed |
 | M7 | IKEv2 cookies | change on Gerrit with negative tests |

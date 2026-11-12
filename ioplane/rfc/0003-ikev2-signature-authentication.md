@@ -1,6 +1,6 @@
 # RFC-0003: IKEv2 signature authentication
 
-Status: draft. Date: 2026-11-12. Roadmap: section 1. Step 1 is done; steps 2 and
+Status: discussed on vpp-dev (sent 2026-11-12, no reply yet). Date: 2026-11-12. Roadmap: section 1. Step 1 is done; steps 2 and
 3 are implemented for RSA keys and not yet on Gerrit.
 Decision record: [ADR-0006](../adr/0006-signature-authentication-first.md).
 
