@@ -1,6 +1,6 @@
 # RFC-0002: Nexthop objects in linux-cp
 
-Status: draft. Date: 2026-11-12. Roadmap: section 2.
+Status: draft, step 1 measured. Date: 2026-11-12, updated 2026-11-17. Roadmap: section 2.
 
 ## Summary
 
@@ -40,6 +40,35 @@ Consequences, to be confirmed by the first step below:
 2. A change of a nexthop group reaches VPP as one route notification per
    route that uses it.
 3. Resilient groups and weights above 255 are not represented faithfully.
+
+## Step 1 results
+
+Measured on 2026-11-16 and 2026-11-17 with a debug image, kernel 6.12 and
+`ip nexthop` in the test namespace. The plugin code was not changed.
+
+| Case | Kernel sends | FIB of the plugin |
+|---|---|---|
+| Route with `nhid`, single object or group, mode 1 | route message with `nh-id` and the expanded next hops | correct paths |
+| Route with `nhid`, mode 0 | route message with `nh-id` only | no entry, no error |
+| IPv4, object deleted | `RTM_DELNEXTHOP` only | route stays |
+| IPv6, object deleted, mode 1 | `RTM_DELNEXTHOP`, then `RTM_DELROUTE` | route removed |
+| Member leaves a group, IPv4 and IPv6 | `RTM_DELNEXTHOP` of the member, `RTM_NEWNEXTHOP` of the group | route keeps the path of the member |
+| `ip nexthop replace` of a used object | `RTM_NEWNEXTHOP`, then a route message per route | correct paths |
+| Link goes down | no message for its objects or their IPv4 routes | routes removed by the existing link-down flush |
+
+Consequence 1 above is confirmed: with mode 0 the route is not installed.
+Consequence 2 holds for a replaced object only; a member that leaves a group
+produces no route message at all. Two cases were not listed and are defects
+with the default mode: the IPv4 route of a deleted object stays, and a path
+through a removed group member stays.
+
+Change 47816 adds the test of mode 1. Change 47866 removes the IPv4 routes
+of a deleted object: it joins the nexthop multicast group, records the
+`nh-id` of an IPv4 route and acts on `RTM_DELNEXTHOP`. A record costs about
+74 bytes for a route with one path, measured with 20 000 routes.
+
+The remaining work of step 2 is the table of objects: it is needed for a
+member that leaves a group and for mode 0.
 
 ## Proposed behaviour
 
@@ -97,8 +126,9 @@ expanded list describe the same paths; the object path is preferred when
 
 ## Open questions
 
-1. Whether the libnl version VPP builds against exposes nexthop objects, or
-   the plugin must parse these messages itself.
+1. Answered: the plugin parses these messages itself. The upstream builders
+   have libnl 3.7.0; libnl parses nexthop objects from 3.8 and reports the
+   `nh-id` of a route from 3.10.
 2. Whether resilient groups should map to a VPP load-balance with a fixed
    bucket count or stay a plain weighted group.
 3. Whether the plugin maintainers prefer step 3 from the start.
